@@ -1,0 +1,9 @@
+.vscode
+.venv
+.python-version
+.pypoetry
+tests/__pycache__
+*.pyc
+dist
+*.sqlite*
+/*.py
