@@ -22,17 +22,6 @@ os.environ['SQLALCHEMY_URL'] = 'sqlite:///my_db.sqlite'
 # Create instance of backend
 backend = Backend()
 
-# Configure Jira Cloud Connector for backend
-backend.add_connector(
-    JiraCloudConnector,
-    name='Jira Loader',
-    domain='example',
-    username='john.doe@example.com',
-    api_token='API_TOKEN',
-    jql = 'project = SPACE',
-    board_id = 42
-)
-
 # Load data
 connector = JiraCloudConnector(
     name='Jira Loader',
