@@ -1,6 +1,6 @@
 import json
 from datetime import datetime
-from typing import Callable, Generator, Iterable
+from typing import Any, Callable, Generator, Iterable
 
 import pytz
 import requests
@@ -25,7 +25,7 @@ class PageTracker:
         self._tracking = False
         self._next_page_token = None
 
-    def track(self, paged_response: dict, results_count: int) -> None:
+    def track(self, paged_response: dict[str, Any], results_count: int) -> None:
         # Paged response with startAt, total and isLast parameters
         if "startAt" in paged_response:
             self._start_at = paged_response["startAt"]
@@ -71,7 +71,7 @@ class PageTracker:
         return self._tracking
 
     @property
-    def next_page_params(self) -> dict:
+    def next_page_params(self) -> dict[str, str | int]:
         if self._next_page_token is not None:
             return {"nextPageToken": self._next_page_token}
         if self._start_at > 0:
@@ -101,62 +101,67 @@ class JiraCloudCredentials:
 class JiraCloudRequests:
     URL_BASE = "https://%s.atlassian.net/"
 
-    def __init__(self, credentials: JiraCloudCredentials, **kwargs) -> None:
+    def __init__(self, credentials: JiraCloudCredentials) -> None:
         self._credentials = credentials
 
     def get(
         self,
-        path,
-        params=None,
-        paged_callback: Callable | None = None,
-        paged_data_key=None,
-        progress_desc=None,
-        **kwargs,
-    ) -> Generator[dict, None, None]:
+        path: str,
+        params: dict[str, Any] | None = None,
+        paged_data_key: str | None = None,
+        progress_desc: str | None = None,
+    ) -> Generator[dict[str, Any], None, None]:
         return self.execute(
             self._get_request,
             path,
             params=params,
-            paged_callback=paged_callback,
             paged_data_key=paged_data_key,
             progress_desc=progress_desc,
-            **kwargs,
         )
 
-    def _get_request(self, url, params, auth, headers) -> requests.Response:
+    def _get_request(
+        self,
+        url: str,
+        params: dict[str, Any],
+        auth: HTTPBasicAuth,
+        headers: dict[str, str],
+    ) -> requests.Response:
         return requests.get(url, params=params, auth=auth, headers=headers)
 
     def post(
         self,
-        path,
-        params=None,
-        paged_callback: Callable | None = None,
-        paged_data_key=None,
-        progress_desc=None,
-        **kwargs,
-    ) -> Generator[dict, None, None]:
+        path: str,
+        params: dict[str, Any] | None = None,
+        paged_data_key: str | None = None,
+        progress_desc: str | None = None,
+    ) -> Generator[dict[str, Any], None, None]:
         return self.execute(
             self._post_request,
             path,
             params=params,
-            paged_callback=paged_callback,
             paged_data_key=paged_data_key,
             progress_desc=progress_desc,
-            **kwargs,
         )
 
-    def _post_request(self, url: str, params, auth, headers) -> requests.Response:
+    def _post_request(
+        self,
+        url: str,
+        params: dict[str, Any],
+        auth: HTTPBasicAuth,
+        headers: dict[str, str],
+    ) -> requests.Response:
         return requests.post(url, data=json.dumps(params), auth=auth, headers=headers)
 
     def execute(
         self,
-        request_call: Callable,
-        path,
-        params=None,
-        paged_data_key=None,
-        progress_desc=None,
-        **kwargs,
-    ) -> Generator[dict, None, None]:
+        request_call: Callable[
+            [str, dict[str, Any], HTTPBasicAuth, dict[str, str]], requests.Response
+        ],
+        path: str,
+        params: dict[str, Any] | None = None,
+        paged_data_key: str | None = None,
+        progress_desc: str | None = None,
+    ) -> Generator[dict[str, Any], None, None]:
         auth = HTTPBasicAuth(self._credentials.username, self._credentials.api_token)
         headers = {"Accept": "application/json", "Content-Type": "application/json"}
 
@@ -170,7 +175,7 @@ class JiraCloudRequests:
             response = request_call(url, params, auth, headers)
             if not response.ok:
                 raise ValueError(response.content)
-            return response.json()
+            yield response.json()
 
         t = PageTracker()
         with tqdm(desc=progress_desc) as pbar:
@@ -203,7 +208,7 @@ class JiraCloudConnector(DataSourceConnector):
         username: str,
         api_token: str,
         jql: str,
-        board_id: int,
+        board_id: str,
     ) -> None:
         self._jira_requests = JiraCloudRequests(
             JiraCloudCredentials(domain, username, api_token)
@@ -254,13 +259,15 @@ class JiraCloudConnector(DataSourceConnector):
                 sprint["self"], sprint["id"], sprint["state"], sprint["name"], index
             )
 
-    def _append(self, ls: list, value):
+    def _append(self, ls: list[str], value: str) -> None:
         ls.append(value)
 
-    def _remove(self, ls: list, value):
+    def _remove(self, ls: list[str], value: str) -> None:
         ls.remove(value)
 
-    def _apply_operations(self, operations: Iterable[tuple[str, str]], ls: list[str]):
+    def _apply_operations(
+        self, operations: Iterable[tuple[str, str]], ls: list[str]
+    ) -> None:
         for operation, value in operations:
             if operation == "append":
                 ls.append(value)

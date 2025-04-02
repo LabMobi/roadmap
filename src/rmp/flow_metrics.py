@@ -1,6 +1,9 @@
+from __future__ import annotations  # https://github.com/pandas-dev/pandas/issues/54494
+from typing import Any, TypedDict, Unpack
 from matplotlib import pyplot as plt
 import numpy as np
 import pandas as pd
+from pandas import DataFrame, Series, Timestamp
 from sqlalchemy import Engine, Select, and_, case, literal, or_
 from sqlalchemy.orm import Session
 from rmp.sql_model import (
@@ -21,7 +24,10 @@ pd.options.mode.copy_on_write = True
 
 class Workflow:
     def __init__(
-        self, not_started: list = [], in_progress: list = [], finished: list = []
+        self,
+        not_started: list[str] = [],
+        in_progress: list[str] = [],
+        finished: list[str] = [],
     ) -> None:
         self._not_started = not_started
         self._in_progress = in_progress
@@ -31,13 +37,34 @@ class Workflow:
         return text.lower().replace(" ", "_")
 
 
+class FilterCFDKwargs(TypedDict, total=False):
+    include_not_started_statuses: bool
+
+
+class FilterStatusChangelogKwargs(TypedDict, total=False):
+    excludes_ranges: list[DateTimeRange] | None
+    only_hierarchy_levels: set[int]
+
+
+class MCSimulationKwargs(TypedDict):
+    runs: int
+
+
+class MCWhenKwargs(MCSimulationKwargs):
+    item_count: int
+
+
+class MCHowManyKwargs(MCSimulationKwargs):
+    target_date: datetime
+
+
 class FlowMetrics:
     def __init__(self, engine: Engine, workflow: Workflow) -> None:
         self._engine = engine
         self._workflow = workflow
         self._validate_workflow_statuses()
 
-    def _select_status_changelog_distinct_arrival(self) -> Select:
+    def _select_status_changelog_distinct_arrival(self) -> Select[tuple[Any, ...]]:
         # Merge finished statuses into one since we are only interested of arrivals into
         # any of the finished statuses
         stmt = select(
@@ -181,7 +208,7 @@ class FlowMetrics:
         self,
         excludes_ranges: list[DateTimeRange] | None = None,
         only_hierarchy_levels: set[int] = {0},
-    ) -> Select:
+    ) -> Select[tuple[Any, ...]]:
         end_time = func.coalesce(ItemStatusChangelog.end_time, datetime.now()).label(
             "end_time"
         )
@@ -358,7 +385,9 @@ class FlowMetrics:
 
         return stmt
 
-    def _select_status_durations(self, current_statuses: list[str]) -> Select:
+    def _select_status_durations(
+        self, current_statuses: list[str]
+    ) -> Select[tuple[Any, ...]]:
         stmt = self._select_status_changelog_with_durations()
 
         stmt = (
@@ -378,7 +407,7 @@ class FlowMetrics:
 
         return stmt
 
-    def _select_backlog_items(self) -> Select:
+    def _select_backlog_items(self) -> Select[tuple[Any, ...]]:
         stmt = (
             select(
                 Item,
@@ -403,9 +432,7 @@ class FlowMetrics:
         )
         return stmt
 
-    def df_cycle_time(
-        self, status_changelog_with_durations: pd.DataFrame
-    ) -> pd.DataFrame:
+    def df_cycle_time(self, status_changelog_with_durations: DataFrame) -> DataFrame:
         df = status_changelog_with_durations
         ct_df = (
             df[
@@ -428,8 +455,8 @@ class FlowMetrics:
         return ct_df
 
     def df_status_cycle_time(
-        self, status_changelog_with_durations: pd.DataFrame
-    ) -> pd.DataFrame:
+        self, status_changelog_with_durations: DataFrame
+    ) -> DataFrame:
         df = status_changelog_with_durations
         ct_status_df = (
             df[
@@ -453,7 +480,7 @@ class FlowMetrics:
         )
         return ct_status_df
 
-    def df_wip_age(self, status_changelog_with_durations: pd.DataFrame) -> pd.DataFrame:
+    def df_wip_age(self, status_changelog_with_durations: DataFrame) -> DataFrame:
         df = status_changelog_with_durations
         wip_age_df = (
             df[
@@ -470,7 +497,7 @@ class FlowMetrics:
 
     def df_workflow_cum_arrivals(
         self, include_not_started_statuses: bool = False
-    ) -> pd.DataFrame:
+    ) -> DataFrame:
         df = pd.read_sql(
             sql=self._select_status_changelog_distinct_arrival(), con=self._engine
         )
@@ -514,21 +541,25 @@ class FlowMetrics:
 
         return df
 
-    def df_status_durations(self, **kwargs) -> pd.DataFrame:
+    def df_status_durations(self, current_statuses: list[str]) -> DataFrame:
         return pd.read_sql(
-            sql=self._select_status_durations(**kwargs), con=self._engine
+            sql=self._select_status_durations(current_statuses), con=self._engine
         )
 
-    def df_status_changelog_with_durations(self, **kwargs) -> pd.DataFrame:
+    def df_status_changelog_with_durations(
+        self, **kwargs: Unpack[FilterStatusChangelogKwargs]
+    ) -> DataFrame:
         return pd.read_sql(
             sql=self._select_status_changelog_with_durations(**kwargs), con=self._engine
         )
 
-    def df_throughput(self) -> pd.Series:
+    def df_throughput(self) -> Series[int]:
         df = self.df_cycle_time(self.df_status_changelog_with_durations())
         return df["finished_time"].value_counts().resample("D").sum()
 
-    def df_monte_carlo_when(self, runs: int = 10000, item_count: int = 10) -> pd.Series:
+    def df_monte_carlo_when(
+        self, runs: int = 10000, item_count: int = 10
+    ) -> Series[int]:
         tp = self.df_throughput()
         start_date = pd.Timestamp.now(tz=timezone.utc)
 
@@ -565,13 +596,13 @@ class FlowMetrics:
         ]
 
         # Convert to Series and count frequencies
-        result = pd.Series(completion_dates).value_counts().sort_index()
+        result = Series(completion_dates).value_counts().sort_index()
 
         return result
 
     def df_monte_carlo_how_many(
         self, target_date: datetime, runs: int = 10000
-    ) -> pd.Series:
+    ) -> Series[int]:
         tp = self.df_throughput()
 
         target_date_df = pd.Timestamp(target_date, tz=timezone.utc)
@@ -594,7 +625,7 @@ class FlowMetrics:
         final_counts = cumulative_sums[:, -1]
 
         # Count frequencies of final counts
-        result = pd.Series(final_counts).value_counts().sort_index()
+        result = Series(final_counts).value_counts().sort_index()
 
         return result
 
@@ -603,7 +634,7 @@ class FlowMetrics:
         mc_when: bool = False,
         mc_when_runs: int = 1000,
         mc_when_percentile: int = 85,
-    ) -> pd.DataFrame:
+    ) -> DataFrame:
         df = pd.read_sql(sql=self._select_backlog_items(), con=self._engine)
 
         # Doing the grouping with DataFrame (not with SQL) as it allows to convert
@@ -641,14 +672,17 @@ class FlowMetrics:
 
         return df
 
-    def plot_cfd(self, **kwargs) -> None:
+    def plot_cfd(self, **kwargs: Unpack[FilterCFDKwargs]) -> None:
         df = self.df_workflow_cum_arrivals(**kwargs)
         df.plot.area(stacked=False, figsize=(20, 10), alpha=1)
 
     def plot_cycle_time_scatter(
-        self, percentiles: list = [50, 70, 85, 95], annotate_item_ids=True, **kwargs
+        self,
+        percentiles: list[int] = [50, 70, 85, 95],
+        annotate_item_ids: bool = True,
+        **kwargs: Unpack[FilterStatusChangelogKwargs],
     ) -> None:
-        df = self.df_status_changelog_with_durations()
+        df = self.df_status_changelog_with_durations(**kwargs)
         ct_df = self.df_cycle_time(df)
 
         # Calculate quantile values for cycle time, useful for forecasting single item cycle time
@@ -676,9 +710,11 @@ class FlowMetrics:
             ax.annotate(f"{int(p * 100)}%", (max_finished, ct_q[p]))
 
     def plot_cycle_time_histogram(
-        self, percentiles: list = [50, 85, 95], **kwargs
+        self,
+        percentiles: list[int] = [50, 85, 95],
+        **kwargs: Unpack[FilterStatusChangelogKwargs],
     ) -> None:
-        df = self.df_status_changelog_with_durations()
+        df = self.df_status_changelog_with_durations(**kwargs)
         ct_df = self.df_cycle_time(df)
 
         # Calculate quantile values for cycle time, useful for forecasting single item cycle time
@@ -697,8 +733,12 @@ class FlowMetrics:
 
         ax.legend()
 
-    def plot_aging_wip(self, percentiles: list = [50, 70, 85, 95], **kwargs) -> None:
-        df = self.df_status_changelog_with_durations()
+    def plot_aging_wip(
+        self,
+        percentiles: list[int] = [50, 70, 85, 95],
+        **kwargs: Unpack[FilterStatusChangelogKwargs],
+    ) -> None:
+        df = self.df_status_changelog_with_durations(**kwargs)
 
         # Item cycle time
         ct_df = self.df_cycle_time(df)
@@ -788,7 +828,11 @@ class FlowMetrics:
         ax = fig.subplots()
         ax.plot(df, marker="o")
 
-    def plot_monte_carlo_when_hist(self, percentiles: list = [50, 85, 95], **kwargs):
+    def plot_monte_carlo_when_hist(
+        self,
+        percentiles: list[int] = [50, 85, 95],
+        **kwargs: Unpack[MCWhenKwargs],
+    ) -> None:
         s = self.df_monte_carlo_when(**kwargs)
 
         fig = plt.figure(figsize=(16, 9))
@@ -810,8 +854,10 @@ class FlowMetrics:
         ax.legend()
 
     def plot_monte_carlo_how_many_hist(
-        self, percentiles: list = [50, 85, 95], **kwargs
-    ):
+        self,
+        percentiles: list[int] = [50, 85, 95],
+        **kwargs: Unpack[MCHowManyKwargs],
+    ) -> None:
         s = self.df_monte_carlo_how_many(**kwargs)
         fig = plt.figure(figsize=(16, 9))
         ax = fig.subplots()
@@ -861,9 +907,9 @@ class FlowMetrics:
                 f"Warning: The following statuses are in the database but not in the workflow: {invalid_statuses}"
             )
 
-    def _get_mc_when_date(self, s: pd.Series, percentile: int) -> datetime:
+    def _get_mc_when_date(self, s: Series[int], percentile: int) -> datetime:
         # Find percentiles for the given *sorted* result
         pct = s.cumsum() / s.sum()
         # Get the first date that matches given percentage
-        p_date = pct[pct >= percentile / 100].index[0]
+        p_date: Timestamp = pct[pct >= percentile / 100].index[0]
         return p_date

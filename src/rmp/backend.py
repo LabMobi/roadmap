@@ -27,7 +27,7 @@ from abc import ABC, abstractmethod
 
 
 class DataSourceConnector(ABC):
-    def __init__(self, name: str, **config):
+    def __init__(self, name: str, **config: dict[str, str]):
         self.name = name
         self.config = config
 
@@ -45,7 +45,7 @@ class DataSourceConnector(ABC):
 
 
 class Backend:
-    def __init__(self):
+    def __init__(self) -> None:
         os.environ["PERSISTENCE_MODULE"] = "eventsourcing_sqlalchemy"
 
         # Create event sourcing system
@@ -65,6 +65,8 @@ class Backend:
         # Get engine/bind, assuming the use of sqlalchemy persistence module
         recorder = typing.cast(SQLAlchemyProcessRecorder, self._item_app.recorder)
         self._engine = recorder.datastore.engine
+        if self._engine is None:
+            raise RuntimeError("Database engine could not be initialized")
 
         # Create other tables
         Base.metadata.create_all(self._engine)
@@ -73,9 +75,12 @@ class Backend:
         self._runner.start()
 
     def add_connector(
-        self, connector_class: Type[DataSourceConnector], **kwargs
+        self,
+        connector_class: Type[DataSourceConnector],
+        name: str,
+        **kwargs: dict[str, str],
     ) -> None:
-        connector = connector_class(**kwargs)
+        connector = connector_class(name, **kwargs)
         with Session(self._engine) as session:
             data_source = DataSource(
                 name=connector.name,

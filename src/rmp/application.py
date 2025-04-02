@@ -1,4 +1,6 @@
 import typing
+
+from typing import Any
 from uuid import UUID
 from eventsourcing.application import Application
 from eventsourcing.system import ProcessApplication
@@ -13,8 +15,9 @@ from rmp.sql_model import (
     Sprint as SqlSprint,
     Milestone as SqlMilestone,
 )
-from eventsourcing.application import AggregateNotFoundError
+from eventsourcing.application import AggregateNotFoundError, ProcessingEvent
 from eventsourcing_sqlalchemy.datastore import Transaction
+from eventsourcing.domain import DomainEventProtocol
 
 
 class ItemDataSourceApplication(Application):
@@ -29,7 +32,7 @@ class ItemDataSourceApplication(Application):
         rank: str,
         sprints: list[str],
         milestones: list[str],
-    ):
+    ) -> UUID:
         item = Item.create(
             url,
             timestamp,
@@ -44,7 +47,7 @@ class ItemDataSourceApplication(Application):
         self.save(item)
         return item.id
 
-    def get_item_by_id(self, id: UUID) -> dict | None:
+    def get_item_by_id(self, id: UUID) -> dict[str, Any] | None:
         try:
             item: Item = self.repository.get(id)
             return {
@@ -61,7 +64,7 @@ class ItemDataSourceApplication(Application):
         except AggregateNotFoundError:
             return None
 
-    def get_item(self, url: str) -> dict | None:
+    def get_item(self, url: str) -> dict[str, Any] | None:
         return self.get_item_by_id(Item.create_id(url))
 
     def change_summary(
@@ -70,7 +73,7 @@ class ItemDataSourceApplication(Application):
         timestamp: datetime,
         summary: str,
         changelog_tracking_id: int | None = None,
-    ):
+    ) -> None:
         item: Item = self.repository.get(Item.create_id(url))
         item.change_summary(
             timestamp, summary, changelog_tracking_id=changelog_tracking_id
@@ -83,7 +86,7 @@ class ItemDataSourceApplication(Application):
         timestamp: datetime,
         to_status: str,
         changelog_tracking_id: int | None = None,
-    ):
+    ) -> None:
         item: Item = self.repository.get(Item.create_id(url))
         item.change_status(
             timestamp,
@@ -99,7 +102,7 @@ class ItemDataSourceApplication(Application):
         timestamp: datetime,
         hierarchy_level: int,
         changelog_tracking_id: int | None = None,
-    ):
+    ) -> None:
         item: Item = self.repository.get(Item.create_id(url))
         item.change_hierarchy_level(
             timestamp, hierarchy_level, changelog_tracking_id=changelog_tracking_id
@@ -112,7 +115,7 @@ class ItemDataSourceApplication(Application):
         timestamp: datetime,
         rank: str,
         changelog_tracking_id: int | None = None,
-    ):
+    ) -> None:
         item: Item = self.repository.get(Item.create_id(url))
         item.change_rank(timestamp, rank, changelog_tracking_id=changelog_tracking_id)
         self.save(item)
@@ -123,7 +126,7 @@ class ItemDataSourceApplication(Application):
         timestamp: datetime,
         sprint_identifier: int,
         changelog_tracking_id: int | None = None,
-    ):
+    ) -> None:
         item: Item = self.repository.get(Item.create_id(url))
         item.add_sprint(
             timestamp, sprint_identifier, changelog_tracking_id=changelog_tracking_id
@@ -136,7 +139,7 @@ class ItemDataSourceApplication(Application):
         timestamp: datetime,
         sprint_identifier: int,
         changelog_tracking_id: int | None = None,
-    ):
+    ) -> None:
         item: Item = self.repository.get(Item.create_id(url))
         item.remove_sprint(
             timestamp, sprint_identifier, changelog_tracking_id=changelog_tracking_id
@@ -149,7 +152,7 @@ class ItemDataSourceApplication(Application):
         timestamp: datetime,
         milestone_identifier: int,
         changelog_tracking_id: int | None = None,
-    ):
+    ) -> None:
         item: Item = self.repository.get(Item.create_id(url))
         item.add_milestone(
             timestamp, milestone_identifier, changelog_tracking_id=changelog_tracking_id
@@ -162,7 +165,7 @@ class ItemDataSourceApplication(Application):
         timestamp: datetime,
         milestone_identifier: int,
         changelog_tracking_id: int | None = None,
-    ):
+    ) -> None:
         item: Item = self.repository.get(Item.create_id(url))
         item.remove_milestone(
             timestamp, milestone_identifier, changelog_tracking_id=changelog_tracking_id
@@ -174,7 +177,7 @@ class ItemDataSourceApplication(Application):
         url: str,
         timestamp: datetime,
         changelog_tracking_id: int | None = None,
-    ):
+    ) -> None:
         item: Item = self.repository.get(Item.create_id(url))
         item.set_changelog_tracking_id(
             timestamp, changelog_tracking_id=changelog_tracking_id
@@ -185,14 +188,14 @@ class ItemDataSourceApplication(Application):
 class SprintDataSourceApplication(Application):
     def create_sprint(
         self, url: str, identifier: str, state: str, name: str, order: int
-    ):
+    ) -> UUID:
         sprint = Sprint.create(url, identifier, state, name, order)
         self.save(sprint)
         return sprint.id
 
     def create_or_update_sprint(
         self, url: str, identifier: str, state: str, name: str, order: int
-    ):
+    ) -> UUID:
         try:
             sprint: Sprint = self.repository.get(Sprint.create_id(url))
         except AggregateNotFoundError:
@@ -214,7 +217,7 @@ class MilestoneDataSourceApplication(Application):
         description: str,
         release_date: datetime,
         released: bool,
-    ):
+    ) -> UUID:
         milestone = Milestone.create(
             url, identifier, name, description, release_date, released
         )
@@ -229,7 +232,7 @@ class MilestoneDataSourceApplication(Application):
         description: str,
         release_date: datetime,
         released: bool,
-    ):
+    ) -> UUID:
         try:
             milestone: Milestone = self.repository.get(Milestone.create_id(url))
         except AggregateNotFoundError:
@@ -256,12 +259,20 @@ class AnalyticsDbApplication(ProcessApplication):
     def _get_transaction(self) -> Transaction:
         return typing.cast(SQLAlchemyProcessRecorder, self.recorder).transaction()
 
-    @singledispatchmethod
-    def policy(self, domain_event, processing_event):
-        pass
+    # @singledispatchmethod  # type: ignore[override]
+    def policy(
+        self, domain_event: DomainEventProtocol, processing_event: ProcessingEvent
+    ) -> None:
+        self._policy(domain_event, processing_event)
 
-    @policy.register(Item.Created)
-    def _(self, domain_event: Item.Created, process_event):
+    @singledispatchmethod
+    def _policy(
+        self, domain_event: DomainEventProtocol, processing_event: ProcessingEvent
+    ) -> None:
+        """Handles different event types"""
+
+    @_policy.register
+    def _(self, domain_event: Item.Created, process_event: ProcessingEvent) -> None:
         with self._get_transaction() as session:
             item = SqlItem(
                 id=domain_event.originator_id,
@@ -301,8 +312,10 @@ class AnalyticsDbApplication(ProcessApplication):
 
             session.commit()
 
-    @policy.register(Item.SummaryChanged)
-    def _(self, domain_event: Item.SummaryChanged, process_event):
+    @_policy.register
+    def _(
+        self, domain_event: Item.SummaryChanged, process_event: ProcessingEvent
+    ) -> None:
         with self._get_transaction() as session:
             session.execute(
                 update(SqlItem)
@@ -311,8 +324,10 @@ class AnalyticsDbApplication(ProcessApplication):
             )
             session.commit()
 
-    @policy.register(Item.HierarchyLevelChanged)
-    def _(self, domain_event: Item.HierarchyLevelChanged, process_event):
+    @_policy.register
+    def _(
+        self, domain_event: Item.HierarchyLevelChanged, process_event: ProcessingEvent
+    ) -> None:
         with self._get_transaction() as session:
             session.execute(
                 update(SqlItem)
@@ -321,8 +336,8 @@ class AnalyticsDbApplication(ProcessApplication):
             )
             session.commit()
 
-    @policy.register(Item.RankChanged)
-    def _(self, domain_event: Item.RankChanged, process_event):
+    @_policy.register
+    def _(self, domain_event: Item.RankChanged, process_event: ProcessingEvent) -> None:
         with self._get_transaction() as session:
             session.execute(
                 update(SqlItem)
@@ -331,8 +346,10 @@ class AnalyticsDbApplication(ProcessApplication):
             )
             session.commit()
 
-    @policy.register(Item.StatusChanged)
-    def _(self, domain_event: Item.StatusChanged, process_event):
+    @_policy.register
+    def _(
+        self, domain_event: Item.StatusChanged, process_event: ProcessingEvent
+    ) -> None:
         to_status = domain_event.to_status
         with self._get_transaction() as session:
             session.execute(
@@ -358,8 +375,8 @@ class AnalyticsDbApplication(ProcessApplication):
             session.add(changelog)
             session.commit()
 
-    @policy.register(Item.SprintAdded)
-    def _(self, domain_event: Item.SprintAdded, process_event):
+    @_policy.register
+    def _(self, domain_event: Item.SprintAdded, process_event: ProcessingEvent) -> None:
         with self._get_transaction() as session:
             sprint = session.execute(
                 select(SqlSprint).where(
@@ -375,8 +392,10 @@ class AnalyticsDbApplication(ProcessApplication):
             item.sprints.append(sprint)
             session.commit()
 
-    @policy.register(Item.SprintRemoved)
-    def _(self, domain_event: Item.SprintRemoved, process_event):
+    @_policy.register
+    def _(
+        self, domain_event: Item.SprintRemoved, process_event: ProcessingEvent
+    ) -> None:
         with self._get_transaction() as session:
             sprint = session.execute(
                 select(SqlSprint).where(
@@ -392,8 +411,10 @@ class AnalyticsDbApplication(ProcessApplication):
             item.sprints.remove(sprint)
             session.commit()
 
-    @policy.register(Item.MilestoneAdded)
-    def _(self, domain_event: Item.MilestoneAdded, process_event):
+    @_policy.register
+    def _(
+        self, domain_event: Item.MilestoneAdded, process_event: ProcessingEvent
+    ) -> None:
         with self._get_transaction() as session:
             milestone = session.execute(
                 select(SqlMilestone).where(
@@ -409,8 +430,10 @@ class AnalyticsDbApplication(ProcessApplication):
             item.milestones.append(milestone)
             session.commit()
 
-    @policy.register(Item.MilestoneRemoved)
-    def _(self, domain_event: Item.MilestoneRemoved, process_event):
+    @_policy.register
+    def _(
+        self, domain_event: Item.MilestoneRemoved, process_event: ProcessingEvent
+    ) -> None:
         with self._get_transaction() as session:
             milestone = session.execute(
                 select(SqlMilestone).where(
@@ -426,8 +449,8 @@ class AnalyticsDbApplication(ProcessApplication):
             item.milestones.remove(milestone)
             session.commit()
 
-    @policy.register(Sprint.Created)
-    def _(self, domain_event: Sprint.Created, process_event):
+    @_policy.register
+    def _(self, domain_event: Sprint.Created, process_event: ProcessingEvent) -> None:
         with self._get_transaction() as session:
             sprint = SqlSprint(
                 id=domain_event.originator_id,
@@ -440,8 +463,10 @@ class AnalyticsDbApplication(ProcessApplication):
             session.add(sprint)
             session.commit()
 
-    @policy.register(Sprint.StateChanged)
-    def _(self, domain_event: Sprint.StateChanged, process_event):
+    @_policy.register
+    def _(
+        self, domain_event: Sprint.StateChanged, process_event: ProcessingEvent
+    ) -> None:
         with self._get_transaction() as session:
             session.execute(
                 update(SqlSprint)
@@ -452,8 +477,10 @@ class AnalyticsDbApplication(ProcessApplication):
             )
             session.commit()
 
-    @policy.register(Sprint.NameChanged)
-    def _(self, domain_event: Sprint.NameChanged, process_event):
+    @_policy.register
+    def _(
+        self, domain_event: Sprint.NameChanged, process_event: ProcessingEvent
+    ) -> None:
         with self._get_transaction() as session:
             session.execute(
                 update(SqlSprint)
@@ -464,8 +491,10 @@ class AnalyticsDbApplication(ProcessApplication):
             )
             session.commit()
 
-    @policy.register(Sprint.OrderChanged)
-    def _(self, domain_event: Sprint.OrderChanged, process_event):
+    @_policy.register
+    def _(
+        self, domain_event: Sprint.OrderChanged, process_event: ProcessingEvent
+    ) -> None:
         with self._get_transaction() as session:
             session.execute(
                 update(SqlSprint)
@@ -476,8 +505,10 @@ class AnalyticsDbApplication(ProcessApplication):
             )
             session.commit()
 
-    @policy.register(Milestone.Created)
-    def _(self, domain_event: Milestone.Created, process_event):
+    @_policy.register
+    def _(
+        self, domain_event: Milestone.Created, process_event: ProcessingEvent
+    ) -> None:
         with self._get_transaction() as session:
             milestone = SqlMilestone(
                 id=domain_event.originator_id,
@@ -491,8 +522,10 @@ class AnalyticsDbApplication(ProcessApplication):
             session.add(milestone)
             session.commit()
 
-    @policy.register(Milestone.NameChanged)
-    def _(self, domain_event: Milestone.NameChanged, process_event):
+    @_policy.register
+    def _(
+        self, domain_event: Milestone.NameChanged, process_event: ProcessingEvent
+    ) -> None:
         with self._get_transaction() as session:
             session.execute(
                 update(SqlMilestone)
@@ -503,8 +536,10 @@ class AnalyticsDbApplication(ProcessApplication):
             )
             session.commit()
 
-    @policy.register(Milestone.DescriptionChanged)
-    def _(self, domain_event: Milestone.DescriptionChanged, process_event):
+    @_policy.register
+    def _(
+        self, domain_event: Milestone.DescriptionChanged, process_event: ProcessingEvent
+    ) -> None:
         with self._get_transaction() as session:
             session.execute(
                 update(SqlMilestone)
@@ -515,8 +550,10 @@ class AnalyticsDbApplication(ProcessApplication):
             )
             session.commit()
 
-    @policy.register(Milestone.ReleaseDateChanged)
-    def _(self, domain_event: Milestone.ReleaseDateChanged, process_event):
+    @_policy.register
+    def _(
+        self, domain_event: Milestone.ReleaseDateChanged, process_event: ProcessingEvent
+    ) -> None:
         with self._get_transaction() as session:
             session.execute(
                 update(SqlMilestone)
@@ -527,8 +564,12 @@ class AnalyticsDbApplication(ProcessApplication):
             )
             session.commit()
 
-    @policy.register(Milestone.ReleasedStateChanged)
-    def _(self, domain_event: Milestone.ReleasedStateChanged, process_event):
+    @_policy.register
+    def _(
+        self,
+        domain_event: Milestone.ReleasedStateChanged,
+        process_event: ProcessingEvent,
+    ) -> None:
         with self._get_transaction() as session:
             session.execute(
                 update(SqlMilestone)

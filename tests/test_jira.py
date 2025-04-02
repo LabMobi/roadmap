@@ -1,10 +1,6 @@
+from typing import Any
 import pytest
-from rmp.jira import JiraCloudCredentials, PageTracker
-
-
-@pytest.fixture
-def credentials():
-    return JiraCloudCredentials("my_domain", None, None)
+from rmp.jira import PageTracker
 
 
 class TestJiraPageTracker:
@@ -23,7 +19,7 @@ class TestJiraPageTracker:
         ],
     )
     def test_page_tracker_last_page(
-        self, paged_response: dict, results_count: int
+        self, paged_response: dict[str, Any], results_count: int
     ) -> None:
         page_tracker = PageTracker()
         assert not page_tracker.tracking()
@@ -40,7 +36,10 @@ class TestJiraPageTracker:
         ],
     )
     def test_page_tracker_has_next_page(
-        self, paged_response: dict, results_count: int, next_page_params: dict
+        self,
+        paged_response: dict[str, Any],
+        results_count: int,
+        next_page_params: dict[str, Any],
     ) -> None:
         page_tracker = PageTracker()
         assert not page_tracker.tracking()

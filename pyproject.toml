@@ -40,3 +40,8 @@ build-backend = "poetry.core.masonry.api"
 packages = [
     { include = "rmp", from = "src" },
 ]
+
+[tool.mypy]
+files = ["src", "tests"]
+strict = true
+disallow_untyped_decorators = false
