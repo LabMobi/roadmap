@@ -3,7 +3,7 @@ from datetime import datetime
 
 
 class TestApplication:
-    def test_item_application(self):
+    def test_item_application(self) -> None:
         app = ItemDataSourceApplication()
         app.create_item(
             "http://example.com/1",
@@ -25,14 +25,45 @@ class TestApplication:
             "rank": "abc",
             "sprints": [],
             "milestones": [],
+            "changelog_tracking_id": None,
         }
 
-        app.change_status("http://example.com/1", datetime.now(), "In Progress")
-        app.change_hierarchy_level("http://example.com/1", datetime.now(), 1)
-        app.change_rank("http://example.com/1", datetime.now(), "def")
-        app.change_summary("http://example.com/1", datetime.now(), "New Summary 1")
-        app.add_milestone("http://example.com/1", datetime.now(), "Milestone 1")
-        app.add_sprint("http://example.com/1", datetime.now(), "Sprint 1")
+        app.change_status(
+            "http://example.com/1",
+            datetime.now(),
+            "In Progress",
+            changelog_tracking_id=1,
+        )
+        app.change_hierarchy_level(
+            "http://example.com/1",
+            datetime.now(),
+            1,
+            changelog_tracking_id=2,
+        )
+        app.change_rank(
+            "http://example.com/1",
+            datetime.now(),
+            "def",
+            changelog_tracking_id=3,
+        )
+        app.change_summary(
+            "http://example.com/1",
+            datetime.now(),
+            "New Summary 1",
+            changelog_tracking_id=4,
+        )
+        app.add_milestone(
+            "http://example.com/1",
+            datetime.now(),
+            1,
+            changelog_tracking_id=5,
+        )
+        app.add_sprint(
+            "http://example.com/1",
+            datetime.now(),
+            10,
+            changelog_tracking_id=6,
+        )
         assert app.get_item("http://example.com/1") == {
             "url": "http://example.com/1",
             "identifier": "KEY-1",
@@ -40,6 +71,7 @@ class TestApplication:
             "status": "In Progress",
             "hierarchy_level": 1,
             "rank": "def",
-            "sprints": ["Sprint 1"],
-            "milestones": ["Milestone 1"],
+            "sprints": [10],
+            "milestones": [1],
+            "changelog_tracking_id": 6,
         }

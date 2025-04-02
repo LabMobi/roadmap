@@ -23,33 +23,44 @@ class Item(Aggregate):
         milestones: list[int]
 
     class SummaryChanged(Aggregate.Event):
+        changelog_tracking_id: int
         summary: str
 
     class StatusChanged(Aggregate.Event):
+        changelog_tracking_id: int
         from_status: str
         to_status: str
 
     class HierarchyLevelChanged(Aggregate.Event):
+        changelog_tracking_id: int
         hierarchy_level: int
 
     class RankChanged(Aggregate.Event):
+        changelog_tracking_id: int
         rank: str
 
     class SprintAdded(Aggregate.Event):
+        changelog_tracking_id: int
         item_id: str
         sprint_identifier: int
 
     class SprintRemoved(Aggregate.Event):
+        changelog_tracking_id: int
         item_id: str
         sprint_identifier: int
 
     class MilestoneAdded(Aggregate.Event):
+        changelog_tracking_id: int
         item_id: str
         milestone_identifier: int
 
     class MilestoneRemoved(Aggregate.Event):
+        changelog_tracking_id: int
         item_id: str
         milestone_identifier: int
+
+    class ChangelogTrackingIdSet(Aggregate.Event):
+        changelog_tracking_id: int
 
     @classmethod
     def create(
@@ -81,59 +92,120 @@ class Item(Aggregate):
     def create_id(cls, url: str) -> UUID:
         return uuid5(NAMESPACE_URL, url)
 
-    def change_summary(self, timestamp: datetime, summary: str) -> None:
-        self.trigger_event(self.SummaryChanged, timestamp=timestamp, summary=summary)
+    def change_summary(
+        self,
+        timestamp: datetime,
+        summary: str,
+        changelog_tracking_id: int | None = None,
+    ) -> None:
+        self.trigger_event(
+            self.SummaryChanged,
+            timestamp=timestamp,
+            changelog_tracking_id=changelog_tracking_id,
+            summary=summary,
+        )
 
     def change_status(
-        self, timestamp: datetime, from_status: str, to_status: str
+        self,
+        timestamp: datetime,
+        from_status: str,
+        to_status: str,
+        changelog_tracking_id: int | None = None,
     ) -> None:
         self.trigger_event(
             self.StatusChanged,
             timestamp=timestamp,
+            changelog_tracking_id=changelog_tracking_id,
             from_status=from_status,
             to_status=to_status,
         )
 
-    def change_hierarchy_level(self, timestamp: datetime, hierarchy_level: int) -> None:
+    def change_hierarchy_level(
+        self,
+        timestamp: datetime,
+        hierarchy_level: int,
+        changelog_tracking_id: int | None = None,
+    ) -> None:
         self.trigger_event(
             self.HierarchyLevelChanged,
+            changelog_tracking_id=changelog_tracking_id,
             timestamp=timestamp,
             hierarchy_level=hierarchy_level,
         )
 
-    def change_rank(self, timestamp: datetime, rank: str) -> None:
-        self.trigger_event(self.RankChanged, timestamp=timestamp, rank=rank)
+    def change_rank(
+        self, timestamp: datetime, rank: str, changelog_tracking_id: int | None = None
+    ) -> None:
+        self.trigger_event(
+            self.RankChanged,
+            timestamp=timestamp,
+            changelog_tracking_id=changelog_tracking_id,
+            rank=rank,
+        )
 
-    def add_sprint(self, timestamp: datetime, sprint_identifier: int) -> None:
+    def add_sprint(
+        self,
+        timestamp: datetime,
+        sprint_identifier: int,
+        changelog_tracking_id: int | None = None,
+    ) -> None:
         self.trigger_event(
             self.SprintAdded,
             item_id=self.id,
             timestamp=timestamp,
+            changelog_tracking_id=changelog_tracking_id,
             sprint_identifier=sprint_identifier,
         )
 
-    def remove_sprint(self, timestamp: datetime, sprint_identifier: int) -> None:
+    def remove_sprint(
+        self,
+        timestamp: datetime,
+        sprint_identifier: int,
+        changelog_tracking_id: int | None = None,
+    ) -> None:
         self.trigger_event(
             self.SprintRemoved,
             item_id=self.id,
             timestamp=timestamp,
+            changelog_tracking_id=changelog_tracking_id,
             sprint_identifier=sprint_identifier,
         )
 
-    def add_milestone(self, timestamp: datetime, milestone_identifier: int) -> None:
+    def add_milestone(
+        self,
+        timestamp: datetime,
+        milestone_identifier: int,
+        changelog_tracking_id: int | None = None,
+    ) -> None:
         self.trigger_event(
             self.MilestoneAdded,
             item_id=self.id,
             timestamp=timestamp,
+            changelog_tracking_id=changelog_tracking_id,
             milestone_identifier=milestone_identifier,
         )
 
-    def remove_milestone(self, timestamp: datetime, milestone_identifier: int) -> None:
+    def remove_milestone(
+        self,
+        timestamp: datetime,
+        milestone_identifier: int,
+        changelog_tracking_id: int | None = None,
+    ) -> None:
         self.trigger_event(
             self.MilestoneRemoved,
             item_id=self.id,
             timestamp=timestamp,
+            changelog_tracking_id=changelog_tracking_id,
             milestone_identifier=milestone_identifier,
+        )
+
+    def set_changelog_tracking_id(
+        self, timestamp: datetime, changelog_tracking_id: int | None = None
+    ) -> None:
+        self.trigger_event(
+            self.ChangelogTrackingIdSet,
+            timestamp=timestamp,
+            changelog_tracking_id=changelog_tracking_id,
         )
 
     @singledispatchmethod
@@ -150,40 +222,53 @@ class Item(Aggregate):
         self.rank = event.rank
         self.sprints = event.sprints
         self.milestones = event.milestones
+        self.changelog_tracking_id: int | None = None
 
     @apply.register
     def _(self, event: Item.SummaryChanged) -> None:
+        self.changelog_tracking_id = event.changelog_tracking_id
         self.summary = event.summary
 
     @apply.register
     def _(self, event: Item.StatusChanged) -> None:
+        self.changelog_tracking_id = event.changelog_tracking_id
         self.status = event.to_status
 
     @apply.register
     def _(self, event: Item.HierarchyLevelChanged) -> None:
+        self.changelog_tracking_id = event.changelog_tracking_id
         self.hierarchy_level = event.hierarchy_level
 
     @apply.register
     def _(self, event: Item.RankChanged) -> None:
+        self.changelog_tracking_id = event.changelog_tracking_id
         self.rank = event.rank
 
     @apply.register
     def _(self, event: Item.SprintAdded) -> None:
+        self.changelog_tracking_id = event.changelog_tracking_id
         self.sprints.append(event.sprint_identifier)
 
     @apply.register
     def _(self, event: Item.SprintRemoved) -> None:
+        self.changelog_tracking_id = event.changelog_tracking_id
         if event.sprint_identifier in self.sprints:
             self.sprints.remove(event.sprint_identifier)
 
     @apply.register
     def _(self, event: Item.MilestoneAdded) -> None:
+        self.changelog_tracking_id = event.changelog_tracking_id
         self.milestones.append(event.milestone_identifier)
 
     @apply.register
     def _(self, event: Item.MilestoneRemoved) -> None:
+        self.changelog_tracking_id = event.changelog_tracking_id
         if event.milestone_identifier in self.milestones:
             self.milestones.remove(event.milestone_identifier)
+
+    @apply.register
+    def _(self, event: Item.ChangelogTrackingIdSet) -> None:
+        self.changelog_tracking_id = event.changelog_tracking_id
 
 
 class Sprint(Aggregate):

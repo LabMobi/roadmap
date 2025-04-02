@@ -82,6 +82,7 @@ class Backend:
                 connector_module=connector_class.__module__,
                 connector_class=connector_class.__name__,
             )
+
             for key, value in kwargs.items():
                 config = Config(key=key, value=value)
                 data_source.configs.append(config)
@@ -111,9 +112,12 @@ class Backend:
                 connectors.append(connector)
 
         for connector in connectors:
-            connector.load_milestones(self._milestone_app)
-            connector.load_sprints(self._sprint_app)
-            connector.load_items(self._item_app)
+            self.load_connector_data(connector)
+
+    def load_connector_data(self, connector: DataSourceConnector) -> None:
+        connector.load_milestones(self._milestone_app)
+        connector.load_sprints(self._sprint_app)
+        connector.load_items(self._item_app)
 
     def replay(self) -> None:
         app: AnalyticsDbApplication = self._runner.get(AnalyticsDbApplication)

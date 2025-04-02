@@ -34,7 +34,15 @@ backend.add_connector(
 )
 
 # Load data
-backend.load_data()
+connector = JiraCloudConnector(
+    name='Jira Loader',
+    domain='example',
+    username='john.doe@example.com',
+    api_token='API_TOKEN',
+    jql = 'project = SPACE',
+    board_id = 42
+)
+backend.load_connector_data(connector)
 ```
 
 ### Analyze Flow Metrics

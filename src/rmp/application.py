@@ -44,65 +44,141 @@ class ItemDataSourceApplication(Application):
         self.save(item)
         return item.id
 
-    def get_item_by_id(self, id: UUID):
-        item: Item = self.repository.get(id)
+    def get_item_by_id(self, id: UUID) -> dict | None:
+        try:
+            item: Item = self.repository.get(id)
+            return {
+                "url": item.url,
+                "identifier": item.identifier,
+                "summary": item.summary,
+                "status": item.status,
+                "hierarchy_level": item.hierarchy_level,
+                "rank": item.rank,
+                "sprints": item.sprints,
+                "milestones": item.milestones,
+                "changelog_tracking_id": item.changelog_tracking_id,
+            }
+        except AggregateNotFoundError:
+            return None
 
-        return {
-            "url": item.url,
-            "identifier": item.identifier,
-            "summary": item.summary,
-            "status": item.status,
-            "hierarchy_level": item.hierarchy_level,
-            "rank": item.rank,
-            "sprints": item.sprints,
-            "milestones": item.milestones,
-        }
-
-    def get_item(self, url: str):
+    def get_item(self, url: str) -> dict | None:
         return self.get_item_by_id(Item.create_id(url))
 
-    def change_summary(self, url: str, timestamp: datetime, summary: str):
+    def change_summary(
+        self,
+        url: str,
+        timestamp: datetime,
+        summary: str,
+        changelog_tracking_id: int | None = None,
+    ):
         item: Item = self.repository.get(Item.create_id(url))
-        item.change_summary(timestamp, summary)
+        item.change_summary(
+            timestamp, summary, changelog_tracking_id=changelog_tracking_id
+        )
         self.save(item)
 
-    def change_status(self, url: str, timestamp: datetime, to_status: str):
+    def change_status(
+        self,
+        url: str,
+        timestamp: datetime,
+        to_status: str,
+        changelog_tracking_id: int | None = None,
+    ):
         item: Item = self.repository.get(Item.create_id(url))
-        item.change_status(timestamp, item.status, to_status)
+        item.change_status(
+            timestamp,
+            item.status,
+            to_status,
+            changelog_tracking_id=changelog_tracking_id,
+        )
         self.save(item)
 
     def change_hierarchy_level(
-        self, url: str, timestamp: datetime, hierarchy_level: int
+        self,
+        url: str,
+        timestamp: datetime,
+        hierarchy_level: int,
+        changelog_tracking_id: int | None = None,
     ):
         item: Item = self.repository.get(Item.create_id(url))
-        item.change_hierarchy_level(timestamp, hierarchy_level)
+        item.change_hierarchy_level(
+            timestamp, hierarchy_level, changelog_tracking_id=changelog_tracking_id
+        )
         self.save(item)
 
-    def change_rank(self, url: str, timestamp: datetime, rank: str):
+    def change_rank(
+        self,
+        url: str,
+        timestamp: datetime,
+        rank: str,
+        changelog_tracking_id: int | None = None,
+    ):
         item: Item = self.repository.get(Item.create_id(url))
-        item.change_rank(timestamp, rank)
+        item.change_rank(timestamp, rank, changelog_tracking_id=changelog_tracking_id)
         self.save(item)
 
-    def add_sprint(self, url: str, timestamp: datetime, sprint_identifier: int):
+    def add_sprint(
+        self,
+        url: str,
+        timestamp: datetime,
+        sprint_identifier: int,
+        changelog_tracking_id: int | None = None,
+    ):
         item: Item = self.repository.get(Item.create_id(url))
-        item.add_sprint(timestamp, sprint_identifier)
+        item.add_sprint(
+            timestamp, sprint_identifier, changelog_tracking_id=changelog_tracking_id
+        )
         self.save(item)
 
-    def remove_sprint(self, url: str, timestamp: datetime, sprint_identifier: int):
+    def remove_sprint(
+        self,
+        url: str,
+        timestamp: datetime,
+        sprint_identifier: int,
+        changelog_tracking_id: int | None = None,
+    ):
         item: Item = self.repository.get(Item.create_id(url))
-        item.remove_sprint(timestamp, sprint_identifier)
+        item.remove_sprint(
+            timestamp, sprint_identifier, changelog_tracking_id=changelog_tracking_id
+        )
         self.save(item)
 
-    def add_milestone(self, url: str, timestamp: datetime, milestone_identifier: int):
+    def add_milestone(
+        self,
+        url: str,
+        timestamp: datetime,
+        milestone_identifier: int,
+        changelog_tracking_id: int | None = None,
+    ):
         item: Item = self.repository.get(Item.create_id(url))
-        item.add_milestone(timestamp, milestone_identifier)
+        item.add_milestone(
+            timestamp, milestone_identifier, changelog_tracking_id=changelog_tracking_id
+        )
         self.save(item)
 
     def remove_milestone(
-        self, url: str, timestamp: datetime, milestone_identifier: int
+        self,
+        url: str,
+        timestamp: datetime,
+        milestone_identifier: int,
+        changelog_tracking_id: int | None = None,
     ):
         item: Item = self.repository.get(Item.create_id(url))
-        item.remove_milestone(timestamp, milestone_identifier)
+        item.remove_milestone(
+            timestamp, milestone_identifier, changelog_tracking_id=changelog_tracking_id
+        )
+        self.save(item)
+
+    def set_changelog_tracking_id(
+        self,
+        url: str,
+        timestamp: datetime,
+        changelog_tracking_id: int | None = None,
+    ):
+        item: Item = self.repository.get(Item.create_id(url))
+        item.set_changelog_tracking_id(
+            timestamp, changelog_tracking_id=changelog_tracking_id
+        )
         self.save(item)
 
 

@@ -290,149 +290,186 @@ class JiraCloudConnector(DataSourceConnector):
         )
 
         for item in items:
+            existing_item = app.get_item(item["self"])
+            params = {}
+            changelog_tracking_id = 0
+            if existing_item:
+                changelog_tracking_id = existing_item["changelog_tracking_id"] or 0
+                params = {"startAt": changelog_tracking_id}
+
             changelogs = list(
                 self._jira_requests.get(
                     self.PATH_GET_ISSUE_CHANGELOG % item["key"],
+                    params=params,
                     paged_data_key="values",
                     progress_desc=f"Loading Jira issue {item['key']} changelog",
                 )
             )
 
-            initial_summary = None
-            initial_status = None
-            initial_hierarchy_level = None
-
-            # Initially this will be the last known set of sprints for item
-            # Reversed changelog changes will be undone on this value, resulting in
-            # the initial set of sprints
-            initial_sprints: list[str] = (
-                [str(s["id"]) for s in item["fields"][self.SPRINTS_FIELD]]
-                if item["fields"][self.SPRINTS_FIELD] is not None
-                else []
-            )
-            changelog_sprint_ops: list[tuple[str, str]] = []
-
-            # Initially this will be the last known set of fix versions for item
-            # Reversed changelog changes will be undone on this value, resulting in
-            # the initial set of fix versions
-            initial_fix_versions: list[str] = [
-                v["id"] for v in item["fields"][self.FIX_VERSIONS_FIELD]
-            ]
-            changelog_fix_version_ops: list[tuple[str, str]] = []
-
-            for changelog in changelogs:
-                # print(changelog)
-                for changelog_item in changelog["items"]:
-                    # print(changelog_item)
-
-                    if initial_summary is None and changelog_item["field"] == "summary":
-                        initial_summary = changelog_item["fromString"]
-
-                    if initial_status is None and changelog_item["field"] == "status":
-                        initial_status = changelog_item["fromString"]
-
-                    if (
-                        initial_hierarchy_level is None
-                        and changelog_item["field"] == "hierarchyLevel"
-                    ):
-                        initial_hierarchy_level = changelog_item["fromString"]
-
-                    from_value: str = changelog_item["from"]
-                    to_value: str = changelog_item["to"]
-
-                    if (
-                        "fieldId" in changelog_item
-                        and changelog_item["fieldId"] == self.SPRINTS_FIELD
-                    ):
-                        from_sprints = (
-                            set(from_value.split(", ")) if from_value else set()
-                        )
-                        to_sprints = set(to_value.split(", ")) if to_value else set()
-
-                        additions = {s.strip() for s in to_sprints - from_sprints}
-                        removals = {s.strip() for s in from_sprints - to_sprints}
-
-                        # Create lambda functions that can be executed later in reverse order
-                        # to reconstruct the initial state by undoing the changelog changes
-                        for added in additions:
-                            changelog_sprint_ops.append(("remove", added))
-                        for removed in removals:
-                            changelog_sprint_ops.append(("append", removed))
-
-                    if (
-                        "fieldId" in changelog_item
-                        and changelog_item["fieldId"] == self.FIX_VERSIONS_FIELD
-                    ):
-                        # Create lambda functions that can be executed later in reverse order
-                        # to reconstruct the initial state by undoing the changelog changes
-                        if from_value and not to_value:
-                            # Version was removed - append it back in reverse
-                            changelog_fix_version_ops.append(("append", from_value))
-                        elif to_value and not from_value:
-                            # Version was added - remove it in reverse
-                            changelog_fix_version_ops.append(("remove", to_value))
-                        else:
-                            raise ValueError(
-                                f"Unexpected changelog state for {self.FIX_VERSIONS_FIELD} field"
-                            )
-
-            # If there was no changes in changelog, set initial values to current values
-            if initial_summary is None:
-                initial_summary = item["fields"]["summary"]
-
-            if initial_status is None:
-                initial_status = item["fields"]["status"]["name"]
-
-            if initial_hierarchy_level is None:
-                initial_hierarchy_level = item["fields"]["issuetype"]["hierarchyLevel"]
-
-            # Undo changes to reconstruct initial state for sprints
-            self._apply_operations(reversed(changelog_sprint_ops), initial_sprints)
-
-            # Undo changes to reconstruct initial state for sprints
-            self._apply_operations(
-                reversed(changelog_fix_version_ops), initial_fix_versions
-            )
-
             url = item["self"]
 
-            timestamp = (
-                datetime.strptime(item["fields"]["created"], "%Y-%m-%dT%H:%M:%S.%f%z")
-                .astimezone(pytz.utc)
-                .replace(tzinfo=None)
-            )
+            if not existing_item:
+                initial_summary = None
+                initial_status = None
+                initial_hierarchy_level = None
 
-            # Changelog does contain event for rank change, but actual value is stored only in the issue, so we do not have
-            # historical ranking changelog available.
-            rank = item["fields"][self.RANK_FIELD]
+                # Initially this will be the last known set of sprints for item
+                # Reversed changelog changes will be undone on this value, resulting in
+                # the initial set of sprints
+                initial_sprints: list[str] = (
+                    [str(s["id"]) for s in item["fields"][self.SPRINTS_FIELD]]
+                    if item["fields"][self.SPRINTS_FIELD] is not None
+                    else []
+                )
+                changelog_sprint_ops: list[tuple[str, str]] = []
 
-            app.create_item(
-                url,
-                timestamp,
-                item["key"],
-                initial_summary,
-                initial_status,
-                initial_hierarchy_level,
-                rank,
-                initial_sprints,
-                initial_fix_versions,
-            )
-            for changelog in changelogs:
-                for changelog_item in changelog["items"]:
-                    timestamp = (
-                        datetime.strptime(
-                            changelog["created"], "%Y-%m-%dT%H:%M:%S.%f%z"
-                        )
-                        .astimezone(pytz.utc)
-                        .replace(tzinfo=None)
+                # Initially this will be the last known set of fix versions for item
+                # Reversed changelog changes will be undone on this value, resulting in
+                # the initial set of fix versions
+                initial_fix_versions: list[str] = [
+                    v["id"] for v in item["fields"][self.FIX_VERSIONS_FIELD]
+                ]
+                changelog_fix_version_ops: list[tuple[str, str]] = []
+
+                for changelog in changelogs:
+                    # print(changelog)
+                    for changelog_item in changelog["items"]:
+                        # print(changelog_item)
+
+                        if (
+                            initial_summary is None
+                            and changelog_item["field"] == "summary"
+                        ):
+                            initial_summary = changelog_item["fromString"]
+
+                        if (
+                            initial_status is None
+                            and changelog_item["field"] == "status"
+                        ):
+                            initial_status = changelog_item["fromString"]
+
+                        if (
+                            initial_hierarchy_level is None
+                            and changelog_item["field"] == "hierarchyLevel"
+                        ):
+                            initial_hierarchy_level = changelog_item["fromString"]
+
+                        from_value: str = changelog_item["from"]
+                        to_value: str = changelog_item["to"]
+
+                        if (
+                            "fieldId" in changelog_item
+                            and changelog_item["fieldId"] == self.SPRINTS_FIELD
+                        ):
+                            from_sprints = (
+                                set(from_value.split(", ")) if from_value else set()
+                            )
+                            to_sprints = (
+                                set(to_value.split(", ")) if to_value else set()
+                            )
+
+                            additions = {s.strip() for s in to_sprints - from_sprints}
+                            removals = {s.strip() for s in from_sprints - to_sprints}
+
+                            # Create lambda functions that can be executed later in reverse order
+                            # to reconstruct the initial state by undoing the changelog changes
+                            for added in additions:
+                                changelog_sprint_ops.append(("remove", added))
+                            for removed in removals:
+                                changelog_sprint_ops.append(("append", removed))
+
+                        if (
+                            "fieldId" in changelog_item
+                            and changelog_item["fieldId"] == self.FIX_VERSIONS_FIELD
+                        ):
+                            # Create lambda functions that can be executed later in reverse order
+                            # to reconstruct the initial state by undoing the changelog changes
+                            if from_value and not to_value:
+                                # Version was removed - append it back in reverse
+                                changelog_fix_version_ops.append(("append", from_value))
+                            elif to_value and not from_value:
+                                # Version was added - remove it in reverse
+                                changelog_fix_version_ops.append(("remove", to_value))
+                            else:
+                                raise ValueError(
+                                    f"Unexpected changelog state for {self.FIX_VERSIONS_FIELD} field"
+                                )
+
+                # If there was no changes in changelog, set initial values to current values
+                if initial_summary is None:
+                    initial_summary = item["fields"]["summary"]
+
+                if initial_status is None:
+                    initial_status = item["fields"]["status"]["name"]
+
+                if initial_hierarchy_level is None:
+                    initial_hierarchy_level = item["fields"]["issuetype"][
+                        "hierarchyLevel"
+                    ]
+
+                # Undo changes to reconstruct initial state for sprints
+                self._apply_operations(reversed(changelog_sprint_ops), initial_sprints)
+
+                # Undo changes to reconstruct initial state for sprints
+                self._apply_operations(
+                    reversed(changelog_fix_version_ops), initial_fix_versions
+                )
+
+                timestamp = (
+                    datetime.strptime(
+                        item["fields"]["created"], "%Y-%m-%dT%H:%M:%S.%f%z"
                     )
+                    .astimezone(pytz.utc)
+                    .replace(tzinfo=None)
+                )
+
+                # Changelog does contain event for rank change, but actual value is stored only in the issue, so we do not have
+                # historical ranking changelog available.
+                rank = item["fields"][self.RANK_FIELD]
+
+                app.create_item(
+                    url,
+                    timestamp,
+                    item["key"],
+                    initial_summary,
+                    initial_status,
+                    initial_hierarchy_level,
+                    rank,
+                    initial_sprints,
+                    initial_fix_versions,
+                )
+
+            last_changelog_timestamp = None
+            for changelog in changelogs:
+                timestamp = (
+                    datetime.strptime(changelog["created"], "%Y-%m-%dT%H:%M:%S.%f%z")
+                    .astimezone(pytz.utc)
+                    .replace(tzinfo=None)
+                )
+                changelog_tracking_id += 1
+                last_changelog_timestamp = timestamp
+
+                for changelog_item in changelog["items"]:
                     if changelog_item["field"] == "summary":
-                        app.change_summary(url, timestamp, changelog_item["toString"])
+                        app.change_summary(
+                            url,
+                            timestamp,
+                            changelog_item["toString"],
+                            changelog_tracking_id=changelog_tracking_id,
+                        )
                     if changelog_item["field"] == "status":
-                        app.change_status(url, timestamp, changelog_item["toString"])
+                        app.change_status(
+                            url,
+                            timestamp,
+                            changelog_item["toString"],
+                            changelog_tracking_id=changelog_tracking_id,
+                        )
                     if changelog_item["field"] == "hierarchyLevel":
                         app.change_hierarchy_level(
-                            url, timestamp, changelog_item["toString"]
+                            url,
+                            timestamp,
+                            changelog_item["toString"],
+                            changelog_tracking_id=changelog_tracking_id,
                         )
                     if (
                         "fieldId" in changelog_item
@@ -450,10 +487,20 @@ class JiraCloudConnector(DataSourceConnector):
                         removed_sprints = from_sprints - to_sprints
 
                         for sprint_identifier in removed_sprints:
-                            app.remove_sprint(url, timestamp, int(sprint_identifier))
+                            app.remove_sprint(
+                                url,
+                                timestamp,
+                                int(sprint_identifier),
+                                changelog_tracking_id=changelog_tracking_id,
+                            )
 
                         for sprint_identifier in added_sprints:
-                            app.add_sprint(url, timestamp, int(sprint_identifier))
+                            app.add_sprint(
+                                url,
+                                timestamp,
+                                int(sprint_identifier),
+                                changelog_tracking_id=changelog_tracking_id,
+                            )
 
                     if (
                         "fieldId" in changelog_item
@@ -463,10 +510,27 @@ class JiraCloudConnector(DataSourceConnector):
                         to_value = changelog_item["to"]
 
                         if from_value and not to_value:
-                            app.remove_milestone(url, timestamp, int(from_value))
+                            app.remove_milestone(
+                                url,
+                                timestamp,
+                                int(from_value),
+                                changelog_tracking_id=changelog_tracking_id,
+                            )
                         elif to_value and not from_value:
-                            app.add_milestone(url, timestamp, int(to_value))
+                            app.add_milestone(
+                                url,
+                                timestamp,
+                                int(to_value),
+                                changelog_tracking_id=changelog_tracking_id,
+                            )
                         else:
                             raise ValueError(
                                 f"Unexpected changelog state for {self.FIX_VERSIONS_FIELD} field"
                             )
+
+            if last_changelog_timestamp:
+                app.set_changelog_tracking_id(
+                    url,
+                    last_changelog_timestamp,
+                    changelog_tracking_id=changelog_tracking_id,
+                )
