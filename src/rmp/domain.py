@@ -374,8 +374,8 @@ class Milestone(Aggregate):
         identifier: str,
         name: str,
         description: str,
-        release_date: datetime,
         released: bool,
+        release_date: datetime | None = None,
     ) -> Milestone:
         return cls._create(
             cls.Created,
@@ -383,8 +383,8 @@ class Milestone(Aggregate):
             identifier=identifier,
             name=name,
             description=description,
-            release_date=release_date,
             released=released,
+            release_date=release_date,
         )
 
     @classmethod
@@ -392,16 +392,16 @@ class Milestone(Aggregate):
         return uuid5(NAMESPACE_URL, url)
 
     def update(
-        self, name: str, description: str, release_date: datetime, released: bool
+        self, name: str, description: str, released: bool, release_date: datetime | None
     ) -> None:
         if self.name != name:
             self.trigger_event(self.NameChanged, name=name)
         if self.description != description:
             self.trigger_event(self.DescriptionChanged, description=description)
-        if self.release_date != release_date:
-            self.trigger_event(self.ReleaseDateChanged, release_date=release_date)
         if self.released != released:
             self.trigger_event(self.ReleasedStateChanged, released=released)
+        if self.release_date != release_date:
+            self.trigger_event(self.ReleaseDateChanged, release_date=release_date)
 
     @singledispatchmethod
     def apply(self, event: Event) -> None:

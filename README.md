@@ -110,5 +110,5 @@ ruff format
 
 Run static type checker
 ```sh
-mypy src tests
+mypy
 ```

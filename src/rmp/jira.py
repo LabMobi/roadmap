@@ -232,18 +232,20 @@ class JiraCloudConnector(DataSourceConnector):
         )
 
         for version in versions:
-            release_date = (
-                datetime.strptime(version["releaseDate"], "%Y-%m-%dT%H:%M:%S.%f%z")
-                .astimezone(pytz.utc)
-                .replace(tzinfo=None)
-            )
+            release_date = None
+            if "releaseDate" in version:
+                release_date = (
+                    datetime.strptime(version["releaseDate"], "%Y-%m-%dT%H:%M:%S.%f%z")
+                    .astimezone(pytz.utc)
+                    .replace(tzinfo=None)
+                )
             app.create_or_update_milestone(
-                version["self"],
-                version["id"],
-                version["name"],
-                version["description"],
-                release_date,
-                version["released"],
+                url=version["self"],
+                identifier=version["id"],
+                name=version["name"],
+                description=version["description"],
+                released=version["released"],
+                release_date=release_date,
             )
 
     @override

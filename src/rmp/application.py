@@ -215,11 +215,11 @@ class MilestoneDataSourceApplication(Application):
         identifier: str,
         name: str,
         description: str,
-        release_date: datetime,
         released: bool,
+        release_date: datetime | None = None,
     ) -> UUID:
         milestone = Milestone.create(
-            url, identifier, name, description, release_date, released
+            url, identifier, name, description, released, release_date
         )
         self.save(milestone)
         return milestone.id
@@ -230,8 +230,8 @@ class MilestoneDataSourceApplication(Application):
         identifier: str,
         name: str,
         description: str,
-        release_date: datetime,
         released: bool,
+        release_date: datetime | None = None,
     ) -> UUID:
         try:
             milestone: Milestone = self.repository.get(Milestone.create_id(url))
@@ -241,15 +241,15 @@ class MilestoneDataSourceApplication(Application):
                 identifier=identifier,
                 name=name,
                 description=description,
-                release_date=release_date,
                 released=released,
+                release_date=release_date,
             )
 
         milestone.update(
             name=name,
             description=description,
-            release_date=release_date,
             released=released,
+            release_date=release_date,
         )
         self.save(milestone)
         return milestone.id
