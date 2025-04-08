@@ -1,6 +1,9 @@
 from __future__ import annotations  # https://github.com/pandas-dev/pandas/issues/54494
-from typing import Any, TypedDict, Unpack
+import math
+from typing import Any, List
 from matplotlib import pyplot as plt
+from matplotlib import dates as mdates
+from matplotlib.axes import Axes
 import numpy as np
 import pandas as pd
 from pandas import DataFrame, Series, Timestamp
@@ -37,45 +40,37 @@ class Workflow:
         return text.lower().replace(" ", "_")
 
 
-class FilterCFDKwargs(TypedDict, total=False):
-    include_not_started_statuses: bool
-
-
-class FilterStatusChangelogKwargs(TypedDict, total=False):
-    excludes_ranges: list[DateTimeRange] | None
-    only_hierarchy_levels: set[int]
-
-
-class MCSimulationKwargs(TypedDict):
-    runs: int
-
-
-class MCWhenKwargs(MCSimulationKwargs):
-    item_count: int
-
-
-class MCHowManyKwargs(MCSimulationKwargs):
-    target_date: datetime
-
-
 class FlowMetrics:
     def __init__(self, engine: Engine, workflow: Workflow) -> None:
         self._engine = engine
         self._workflow = workflow
         self._validate_workflow_statuses()
 
-    def _select_status_changelog_distinct_arrival(self) -> Select[tuple[Any, ...]]:
+    def _select_status_changelog_distinct_arrival(
+        self,
+        only_hierarchy_levels: set[int] = {0},
+    ) -> Select[tuple[Any, ...]]:
+        with_only_hierarchy_levels = (
+            select(
+                ItemStatusChangelog.item_id,
+                ItemStatusChangelog.start_time,
+                ItemStatusChangelog.status,
+            )
+            .join(Item, Item.id == ItemStatusChangelog.item_id)
+            .where(Item.hierarchy_level.in_(only_hierarchy_levels))
+        ).cte("_only_hierarchy_levels")
+
         # Merge finished statuses into one since we are only interested of arrivals into
         # any of the finished statuses
         stmt = select(
-            ItemStatusChangelog.item_id,
-            ItemStatusChangelog.start_time,
+            with_only_hierarchy_levels.c.item_id,
+            with_only_hierarchy_levels.c.start_time,
             case(
                 (
-                    ItemStatusChangelog.status.in_(self._workflow._finished),
+                    with_only_hierarchy_levels.c.status.in_(self._workflow._finished),
                     "/".join(self._workflow._finished),
                 ),
-                else_=ItemStatusChangelog.status,
+                else_=with_only_hierarchy_levels.c.status,
             ).label("status"),
         ).cte("_merged_statuses")
 
@@ -206,12 +201,11 @@ class FlowMetrics:
 
     def _select_status_changelog_with_durations(
         self,
-        excludes_ranges: list[DateTimeRange] | None = None,
         only_hierarchy_levels: set[int] = {0},
     ) -> Select[tuple[Any, ...]]:
-        end_time = func.coalesce(ItemStatusChangelog.end_time, datetime.now()).label(
-            "end_time"
-        )
+        end_time = func.coalesce(
+            ItemStatusChangelog.end_time, datetime.now().replace(microsecond=0)
+        ).label("end_time")
         duration = (
             func.strftime("%s", end_time)
             - func.strftime("%s", ItemStatusChangelog.start_time)
@@ -226,93 +220,6 @@ class FlowMetrics:
             # Item.identifier,
             # Item.hierarchy_level
         ).cte("_duration")
-
-        if excludes_ranges is not None:
-            # Ensure exclude_ranges do not overlap each other
-            for i in range(len(excludes_ranges)):
-                for j in range(i + 1, len(excludes_ranges)):
-                    if excludes_ranges[i].is_intersection(excludes_ranges[j]) and not (
-                        excludes_ranges[i].start_datetime
-                        == excludes_ranges[j].end_datetime
-                        or excludes_ranges[i].end_datetime
-                        == excludes_ranges[j].start_datetime
-                    ):
-                        raise ValueError(
-                            f"Exclude ranges {excludes_ranges[i]} and {excludes_ranges[j]} overlap."
-                        )
-
-            # Start correcting original durations with the exclude ranges
-            # Create CTE first for all provided exclude ranges
-            exclude_ranges_stmts = [
-                select(
-                    literal(range.start_datetime).label("exclude_start_time"),
-                    literal(range.end_datetime).label("exclude_end_time"),
-                )
-                for range in excludes_ranges
-            ]
-            excludes = union_all(*exclude_ranges_stmts).cte(name="_exclude_ranges")
-
-            # Find overlapping ranges and calculate correction
-            # This may produce multiple changelog rows when more than one exclude
-            # range is provided, therefore results need aggregating in next step
-            overlap_sq = (
-                select(
-                    with_duration,
-                    excludes.c.exclude_start_time,
-                    excludes.c.exclude_end_time,
-                    # Find overlap of original duration range and exclude range
-                    func.max(
-                        excludes.c.exclude_start_time, with_duration.c.start_time
-                    ).label("correction_start_time"),
-                    func.min(
-                        excludes.c.exclude_end_time, with_duration.c.end_time
-                    ).label("correction_end_time"),
-                    # Calculate correction that will be used to modify the original duration
-                    (
-                        func.strftime(
-                            "%s",
-                            func.max(
-                                excludes.c.exclude_start_time,
-                                with_duration.c.start_time,
-                            ),
-                        )
-                        - func.strftime(
-                            "%s",
-                            func.min(
-                                excludes.c.exclude_end_time, with_duration.c.end_time
-                            ),
-                        )
-                    ).label("duration_correction"),
-                )
-                .join(
-                    excludes,
-                    and_(
-                        with_duration.c.start_time < excludes.c.exclude_end_time,
-                        with_duration.c.end_time >= excludes.c.exclude_start_time,
-                    ),
-                    isouter=True,
-                )
-                .subquery("_overlap")
-            )
-
-            # Aggregate duration data with corrections
-            with_corrected = select(
-                overlap_sq.c.item_id,
-                overlap_sq.c.status,
-                overlap_sq.c.start_time,
-                overlap_sq.c.end_time,
-                (
-                    func.max(overlap_sq.c.duration)
-                    + func.coalesce(func.sum(overlap_sq.c.duration_correction), 0)
-                ).label("duration"),
-                func.max(overlap_sq.c.duration).label("duration_wo_exclude_ranges"),
-            ).group_by(
-                overlap_sq.c.item_id,
-                overlap_sq.c.status,
-                overlap_sq.c.start_time,
-                overlap_sq.c.end_time,
-            )
-            with_duration = with_corrected.cte("_corrected_duration")
 
         # If status has some duration, consider this as effective status
         # this helps to figure out last active status
@@ -377,12 +284,12 @@ class FlowMetrics:
             finished_time,
         ).cte("_current_status")
 
+        # Join with item table for additional item information and final filtering
         stmt = (
             select(with_current_status, Item.identifier.label("item_identifier"))
             .join(Item, Item.id == with_current_status.c.item_id)
             .where(Item.hierarchy_level.in_(only_hierarchy_levels))
         )
-
         return stmt
 
     def _select_status_durations(
@@ -407,7 +314,9 @@ class FlowMetrics:
 
         return stmt
 
-    def _select_backlog_items(self) -> Select[tuple[Any, ...]]:
+    def _select_backlog_items(
+        self, only_hierarchy_levels: set[int] = {0}
+    ) -> Select[tuple[Any, ...]]:
         stmt = (
             select(
                 Item,
@@ -423,7 +332,7 @@ class FlowMetrics:
             .outerjoin(Milestone)
             .order_by(Sprint.order.nulls_last(), Item.rank)
             .where(
-                Item.hierarchy_level == 0,
+                Item.hierarchy_level.in_(only_hierarchy_levels),
                 Item.status.in_(
                     self._workflow._not_started + self._workflow._in_progress
                 ),
@@ -434,6 +343,7 @@ class FlowMetrics:
 
     def df_cycle_time(self, status_changelog_with_durations: DataFrame) -> DataFrame:
         df = status_changelog_with_durations
+
         ct_df = (
             df[
                 (df["current_status"].isin(self._workflow._finished))
@@ -451,7 +361,11 @@ class FlowMetrics:
             .rename(columns={"duration": "cycle_time"})
             .reset_index()
         )
-        ct_df["cycle_time"] = (ct_df["cycle_time"] / 60 / 60 / 24).apply(np.ceil)
+        ct_df["cycle_time"] = ct_df["cycle_time"] / 60 / 60 / 24
+
+        # Drop rows with zero cycle time, this can happen due to exclude ranges canceling out durations
+        ct_df = ct_df[ct_df["cycle_time"] > 0]
+
         return ct_df
 
     def df_status_cycle_time(
@@ -475,9 +389,7 @@ class FlowMetrics:
             .rename(columns={"duration": "cycle_time"})
             .reset_index()
         )
-        ct_status_df["cycle_time"] = (ct_status_df["cycle_time"] / 60 / 60 / 24).apply(
-            np.ceil
-        )
+        ct_status_df["cycle_time"] = ct_status_df["cycle_time"] / 60 / 60 / 24
         return ct_status_df
 
     def df_wip_age(self, status_changelog_with_durations: DataFrame) -> DataFrame:
@@ -496,10 +408,15 @@ class FlowMetrics:
         return wip_age_df
 
     def df_workflow_cum_arrivals(
-        self, include_not_started_statuses: bool = False
+        self,
+        include_not_started_statuses: bool = False,
+        only_hierarchy_levels: set[int] = {0},
     ) -> DataFrame:
         df = pd.read_sql(
-            sql=self._select_status_changelog_distinct_arrival(), con=self._engine
+            sql=self._select_status_changelog_distinct_arrival(
+                only_hierarchy_levels=only_hierarchy_levels
+            ),
+            con=self._engine,
         )
 
         # Backfill start_time to consider arrival into any of preceding statuses
@@ -541,26 +458,85 @@ class FlowMetrics:
 
         return df
 
-    def df_status_durations(self, current_statuses: list[str]) -> DataFrame:
-        return pd.read_sql(
-            sql=self._select_status_durations(current_statuses), con=self._engine
-        )
-
     def df_status_changelog_with_durations(
-        self, **kwargs: Unpack[FilterStatusChangelogKwargs]
+        self, only_hierarchy_levels: set[int] = {0}
     ) -> DataFrame:
         return pd.read_sql(
-            sql=self._select_status_changelog_with_durations(**kwargs), con=self._engine
+            sql=self._select_status_changelog_with_durations(
+                only_hierarchy_levels=only_hierarchy_levels
+            ),
+            con=self._engine,
         )
 
-    def df_throughput(self) -> Series[int]:
-        df = self.df_cycle_time(self.df_status_changelog_with_durations())
-        return df["finished_time"].value_counts().resample("D").sum()
+    def df_throughput(
+        self,
+        resample_exclude_ranges: bool = True,
+        exclude_ranges: list[DateTimeRange] | None = None,
+        only_hierarchy_levels: set[int] = {0},
+    ) -> Series[int]:
+        df = self.df_cycle_time(
+            self.df_status_changelog_with_durations(
+                only_hierarchy_levels=only_hierarchy_levels
+            )
+        )
+
+        if exclude_ranges:
+            # Convert finished_time to datetime if not already
+            df["finished_time"] = pd.to_datetime(df["finished_time"])
+
+            # Create a mask of rows to keep (not in any exclude range)
+            keep_mask = pd.Series(True, index=df.index)
+            for exclude_range in exclude_ranges:
+                if (
+                    exclude_range.start_datetime is None
+                    or exclude_range.end_datetime is None
+                ):
+                    raise ValueError(
+                        "Both start_datetime and end_datetime must be provided in the DateTimeRange."
+                    )
+
+                range_mask = ~df["finished_time"].between(
+                    exclude_range.start_datetime,
+                    exclude_range.end_datetime,
+                    inclusive="both",
+                )
+                keep_mask &= range_mask
+
+            # Filter the dataframe
+            df = df[keep_mask]
+
+        # Prepare throughput data
+        tp = df["finished_time"].value_counts().resample("D").sum()
+
+        if not exclude_ranges:
+            return tp
+
+        if not resample_exclude_ranges:
+            # Remove excluded ranges from throughput
+            for range in exclude_ranges:
+                # Remove elements from the Series that fall within the excluded range
+                if range.start_datetime is not None and range.end_datetime is not None:
+                    tp = tp[
+                        ~tp.index.to_series().between(
+                            range.start_datetime, range.end_datetime
+                        )
+                    ]
+
+        return tp
 
     def df_monte_carlo_when(
-        self, runs: int = 10000, item_count: int = 10
+        self,
+        runs: int = 10000,
+        item_count: int = 10,
+        exclude_ranges: list[DateTimeRange] | None = None,
+        only_hierarchy_levels: set[int] = {0},
     ) -> Series[int]:
-        tp = self.df_throughput()
+        tp = self.df_throughput(
+            resample_exclude_ranges=False,
+            exclude_ranges=exclude_ranges,
+            only_hierarchy_levels=only_hierarchy_levels,
+        )
+
         start_date = pd.Timestamp.now(tz=timezone.utc)
 
         # Convert throughput series to numpy array for faster sampling
@@ -601,9 +577,17 @@ class FlowMetrics:
         return result
 
     def df_monte_carlo_how_many(
-        self, target_date: datetime, runs: int = 10000
+        self,
+        target_date: datetime,
+        runs: int = 10000,
+        exclude_ranges: list[DateTimeRange] | None = None,
+        only_hierarchy_levels: set[int] = {0},
     ) -> Series[int]:
-        tp = self.df_throughput()
+        tp = self.df_throughput(
+            resample_exclude_ranges=False,
+            exclude_ranges=exclude_ranges,
+            only_hierarchy_levels=only_hierarchy_levels,
+        )
 
         target_date_df = pd.Timestamp(target_date, tz=timezone.utc)
         start_date = pd.Timestamp.now(tz=timezone.utc)
@@ -634,8 +618,13 @@ class FlowMetrics:
         mc_when: bool = False,
         mc_when_runs: int = 1000,
         mc_when_percentile: int = 85,
+        mc_exclude_ranges: list[DateTimeRange] | None = None,
+        only_hierarchy_levels: set[int] = {0},
     ) -> DataFrame:
-        df = pd.read_sql(sql=self._select_backlog_items(), con=self._engine)
+        df = pd.read_sql(
+            sql=self._select_backlog_items(only_hierarchy_levels=only_hierarchy_levels),
+            con=self._engine,
+        )
 
         # Doing the grouping with DataFrame (not with SQL) as it allows to convert
         # multiple milestone names into list data type directly
@@ -664,7 +653,12 @@ class FlowMetrics:
         if mc_when:
             df["mc_when"] = df.index.map(
                 lambda x: self._get_mc_when_date(
-                    self.df_monte_carlo_when(mc_when_runs, item_count=x + 1),
+                    self.df_monte_carlo_when(
+                        mc_when_runs,
+                        item_count=x + 1,
+                        exclude_ranges=mc_exclude_ranges,
+                        only_hierarchy_levels=only_hierarchy_levels,
+                    ),
                     percentile=mc_when_percentile,
                 )
             )
@@ -672,28 +666,59 @@ class FlowMetrics:
 
         return df
 
-    def plot_cfd(self, **kwargs: Unpack[FilterCFDKwargs]) -> None:
-        df = self.df_workflow_cum_arrivals(**kwargs)
-        df.plot.area(stacked=False, figsize=(20, 10), alpha=1)
+    def plot_cfd(
+        self,
+        highlight_ranges: list[DateTimeRange] | None = None,
+        include_not_started_statuses: bool = False,
+        only_hierarchy_levels: set[int] = {0},
+    ) -> None:
+        df = self.df_workflow_cum_arrivals(
+            include_not_started_statuses=include_not_started_statuses,
+            only_hierarchy_levels=only_hierarchy_levels,
+        )
+
+        fig = plt.figure(figsize=(16, 9))
+        ax = fig.subplots()
+
+        df.plot(ax=ax, kind="area", stacked=False, alpha=1)
+
+        if highlight_ranges:
+            self._highlight_exclude_ranges(ax, highlight_ranges, None)
 
     def plot_cycle_time_scatter(
         self,
         percentiles: list[int] = [50, 70, 85, 95],
         annotate_item_ids: bool = True,
-        **kwargs: Unpack[FilterStatusChangelogKwargs],
+        exclude_ranges: list[DateTimeRange] | None = None,
+        only_hierarchy_levels: set[int] = {0},
     ) -> None:
-        df = self.df_status_changelog_with_durations(**kwargs)
+        df = self.df_status_changelog_with_durations(
+            only_hierarchy_levels=only_hierarchy_levels
+        )
         ct_df = self.df_cycle_time(df)
 
+        df_ranges_excluded = self._df_exclude_ranges_from_durations(
+            df, excludes=exclude_ranges
+        )
+        ct_df_ranges_excluded = self.df_cycle_time(df_ranges_excluded)
+
         # Calculate quantile values for cycle time, useful for forecasting single item cycle time
-        ct_q = ct_df["cycle_time"].quantile([p / 100 for p in percentiles])
+        ct_q = ct_df_ranges_excluded["cycle_time"].quantile(
+            [p / 100 for p in percentiles]
+        )
 
         fig = plt.figure(figsize=(16, 9))
         ax = fig.subplots()
 
         ax.scatter(
-            x=ct_df["finished_time"], y=ct_df["cycle_time"], label="Cycle Time (days)"
+            x=ct_df["finished_time"],
+            y=ct_df["cycle_time"],
+            label="Cycle Time (days)",
         )
+
+        # Highlight excluded ranges
+        if exclude_ranges:
+            self._highlight_exclude_ranges(ax, exclude_ranges, "Ranges excluded")
 
         if annotate_item_ids:
             for _, row in ct_df.iterrows():
@@ -705,22 +730,31 @@ class FlowMetrics:
         min_finished = ct_df["finished_time"].min()
         max_finished = ct_df["finished_time"].max()
         for p in ct_q.index:
-            ax.plot((min_finished, max_finished), (ct_q[p], ct_q[p]), "--")
-            ax.annotate(f"{int(ct_q[p])}", (min_finished, ct_q[p]))
-            ax.annotate(f"{int(p * 100)}%", (max_finished, ct_q[p]))
+            ct_q_value = math.ceil(ct_q[p])
+            ax.plot((min_finished, max_finished), (ct_q_value, ct_q_value), "--")
+            ax.annotate(f"{ct_q_value}", (min_finished, ct_q_value))
+            ax.annotate(f"{int(p * 100)}%", (max_finished, ct_q_value))
+
+        ax.legend()
 
     def plot_cycle_time_histogram(
         self,
         percentiles: list[int] = [50, 85, 95],
-        **kwargs: Unpack[FilterStatusChangelogKwargs],
+        exclude_ranges: list[DateTimeRange] | None = None,
+        only_hierarchy_levels: set[int] = {0},
     ) -> None:
-        df = self.df_status_changelog_with_durations(**kwargs)
-        ct_df = self.df_cycle_time(df)
+        df = self.df_status_changelog_with_durations(
+            only_hierarchy_levels=only_hierarchy_levels
+        )
+        df_ranges_excluded = self._df_exclude_ranges_from_durations(
+            df, excludes=exclude_ranges
+        )
+        ct_df = self.df_cycle_time(df_ranges_excluded)
 
         # Calculate quantile values for cycle time, useful for forecasting single item cycle time
         ct_q = ct_df["cycle_time"].quantile([p / 100 for p in percentiles])
 
-        cycle_times = ct_df["cycle_time"]
+        cycle_times = np.ceil(ct_df["cycle_time"])  # .astype(int)
         fig = plt.figure(figsize=(16, 9))
         ax = fig.subplots()
         ax.hist(cycle_times, bins=int(cycle_times.max()))
@@ -728,29 +762,42 @@ class FlowMetrics:
 
         for p in ct_q.index:
             ax.plot(
-                (ct_q[p], ct_q[p]), [0, cycle_times.value_counts().max()], label=str(p)
+                (ct_q[p], ct_q[p]),
+                [0, cycle_times.value_counts().max()],
+                label=f"{int(p * 100)}%",
             )
 
-        ax.legend()
+        if exclude_ranges:
+            self._annotate_exclude_ranges(ax, exclude_ranges)
+
+        ax.legend(loc="upper right")
 
     def plot_aging_wip(
         self,
         percentiles: list[int] = [50, 70, 85, 95],
-        **kwargs: Unpack[FilterStatusChangelogKwargs],
+        exclude_ranges: list[DateTimeRange] | None = None,
+        only_hierarchy_levels: set[int] = {0},
     ) -> None:
-        df = self.df_status_changelog_with_durations(**kwargs)
+        df = self.df_status_changelog_with_durations(
+            only_hierarchy_levels=only_hierarchy_levels
+        )
+        df_ranges_excluded = self._df_exclude_ranges_from_durations(
+            df, excludes=exclude_ranges
+        )
 
         # Item cycle time
-        ct_df = self.df_cycle_time(df)
+        ct_df_ranges_excluded = self.df_cycle_time(df_ranges_excluded)
 
         # Item status cycle time
-        ct_status_df = self.df_status_cycle_time(df)
+        ct_status_df = self.df_status_cycle_time(df_ranges_excluded)
 
         # Item wip age
-        wip_age_df = self.df_wip_age(df)
+        wip_age_df = self.df_wip_age(df_ranges_excluded)
 
-        # Calculate quantile values for cycle time, useful for forecasting single item cycle time
-        ct_q = ct_df["cycle_time"].quantile([p / 100 for p in percentiles])
+        # Calculate quantile values for cycle time
+        ct_q = ct_df_ranges_excluded["cycle_time"].quantile(
+            [p / 100 for p in percentiles]
+        )
 
         # The plot will be generated for each "in progress" and "finished" status
         statuses = self._workflow._in_progress + self._workflow._finished
@@ -769,6 +816,11 @@ class FlowMetrics:
             ax.set_xlabel(status)
             ax.set_xticks([])
             ax.set_ylim(bottom=0, top=plot_h)
+
+            if index == 1:
+                if exclude_ranges:
+                    self._annotate_exclude_ranges(ax, exclude_ranges)
+
             if index != 1:
                 ax.get_yaxis().set_visible(False)
 
@@ -783,12 +835,9 @@ class FlowMetrics:
                     .reset_index()
                 )
 
-                # status_ct = self.items_cycle_time(include_statuses=include_statuses)
                 pace_q = cur_status_ct_df["cycle_time"].quantile(
                     [p / 100 for p in percentiles]
                 )
-                # col = f'ct_{self._workflow.to_snake_case(status)}'
-                # pace_q = df[col].quantile([p / 100 for p in percentiles])
 
                 pace_colors = [
                     "xkcd:dark mint",
@@ -802,7 +851,9 @@ class FlowMetrics:
 
                 # Cover the red bar with rest of pace percentiles
                 for p in pace_q.index.sort_values(ascending=False):
-                    ax.bar(0.5, pace_q.loc[p], color=pace_colors.pop())
+                    h = math.ceil(pace_q.loc[p])
+                    ax.bar(0.5, h, color=pace_colors.pop())
+                    ax.annotate(f"{h}", (0, h))
 
             # Filter data for this status
             df_status = wip_age_df[wip_age_df["current_status"] == status]
@@ -815,25 +866,48 @@ class FlowMetrics:
 
             # Plot cycle time quantiles
             for p in ct_q.index:
-                ax.plot([0, 1], [ct_q[p], ct_q[p]], "--", color="gray", label=str(p))
+                ct_q_value = math.ceil(ct_q[p])
+                ax.plot(
+                    [0, 1], [ct_q_value, ct_q_value], "--", color="gray", label=str(p)
+                )
                 if index == 1:
-                    ax.annotate(ct_q[p], (0, ct_q[p]))
+                    ax.annotate(f"{ct_q_value}", (0, ct_q_value))
                 if index == len(statuses):
-                    ax.annotate(f"{int(p * 100)}%", (0.5, ct_q[p]))
+                    ax.annotate(f"{int(p * 100)}%", (0.5, ct_q_value))
 
-    def plot_throughput_run_chart(self) -> None:
-        df = self.df_throughput()
+    def plot_throughput_run_chart(
+        self,
+        highlight_exclude_ranges: list[DateTimeRange] | None = None,
+        only_hierarchy_levels: set[int] = {0},
+    ) -> None:
+        df = self.df_throughput(only_hierarchy_levels=only_hierarchy_levels)
 
         fig = plt.figure(figsize=(16, 9))
         ax = fig.subplots()
         ax.plot(df, marker="o")
 
+        # Highlight ranges that are excluded
+        if highlight_exclude_ranges:
+            self._highlight_exclude_ranges(
+                ax, highlight_exclude_ranges, "Excluded ranges"
+            )
+
+        ax.legend()
+
     def plot_monte_carlo_when_hist(
         self,
         percentiles: list[int] = [50, 85, 95],
-        **kwargs: Unpack[MCWhenKwargs],
+        runs: int = 10000,
+        item_count: int = 10,
+        excludes_finished_at: list[DateTimeRange] | None = None,
+        only_hierarchy_levels: set[int] = {0},
     ) -> None:
-        s = self.df_monte_carlo_when(**kwargs)
+        s = self.df_monte_carlo_when(
+            runs=runs,
+            item_count=item_count,
+            exclude_ranges=excludes_finished_at,
+            only_hierarchy_levels=only_hierarchy_levels,
+        )
 
         fig = plt.figure(figsize=(16, 9))
         ax = fig.subplots()
@@ -845,20 +919,29 @@ class FlowMetrics:
         for p in percentiles:
             # Get the first date that matches given percentage
             p_date = pct[pct >= p / 100].index[0]
-            ax.plot(
-                [p_date, p_date], [0, s.max() * 1.1], label=str(p) + "th percentile"
-            )
+            ax.plot([p_date, p_date], [0, s.max() * 1.1], label=f"{p}%")
             p_dates += [p_date]
 
         ax.set_xticks(p_dates)
+
+        if excludes_finished_at:
+            self._annotate_exclude_ranges(ax, excludes_finished_at)
         ax.legend()
 
     def plot_monte_carlo_how_many_hist(
         self,
+        target_date: datetime,
+        runs: int = 10000,
         percentiles: list[int] = [50, 85, 95],
-        **kwargs: Unpack[MCHowManyKwargs],
+        exclude_ranges: list[DateTimeRange] | None = None,
+        only_hierarchy_levels: set[int] = {0},
     ) -> None:
-        s = self.df_monte_carlo_how_many(**kwargs)
+        s = self.df_monte_carlo_how_many(
+            target_date=target_date,
+            exclude_ranges=exclude_ranges,
+            runs=runs,
+            only_hierarchy_levels=only_hierarchy_levels,
+        )
         fig = plt.figure(figsize=(16, 9))
         ax = fig.subplots()
         ax.bar(s.index, s)
@@ -876,11 +959,14 @@ class FlowMetrics:
             ax.plot(
                 [how_many, how_many],
                 [0, s.max() * 1.1],
-                label=str(p) + "th percentile",
+                label=f"{p}%",
             )
             how_manys += [how_many]
 
         ax.set_xticks(how_manys)
+
+        if exclude_ranges:
+            self._annotate_exclude_ranges(ax, exclude_ranges)
         ax.legend()
 
     def _validate_workflow_statuses(self) -> None:
@@ -913,3 +999,89 @@ class FlowMetrics:
         # Get the first date that matches given percentage
         p_date: Timestamp = pct[pct >= percentile / 100].index[0]
         return p_date
+
+    def _validate_exclude_ranges(
+        self, exclude_ranges: List[DateTimeRange] | None
+    ) -> None:
+        if exclude_ranges is None:
+            return
+        for i in range(len(exclude_ranges)):
+            for j in range(i + 1, len(exclude_ranges)):
+                if exclude_ranges[i].is_intersection(exclude_ranges[j]) and not (
+                    exclude_ranges[i].start_datetime == exclude_ranges[j].end_datetime
+                    or exclude_ranges[i].end_datetime
+                    == exclude_ranges[j].start_datetime
+                ):
+                    raise ValueError(
+                        f"Exclude ranges {exclude_ranges[i]} and {exclude_ranges[j]} overlap."
+                    )
+
+    def _highlight_exclude_ranges(
+        self, ax: Axes, ranges: list[DateTimeRange], label: str | None
+    ) -> None:
+        """Highlights exclude ranges on a plot."""
+
+        for date_range in ranges:
+            start_time = date_range.start_datetime
+            end_time = date_range.end_datetime
+            ax.axvspan(
+                mdates.date2num(start_time),  # type: ignore
+                mdates.date2num(end_time),  # type: ignore
+                alpha=0.5,
+                color="gray",
+                label=label,
+            )
+            label = None  # Only show label for the first range
+
+    def _annotate_exclude_ranges(self, ax: Axes, ranges: list[DateTimeRange]) -> None:
+        text = ",".join([str(r) for r in ranges])
+        ax.text(
+            0.0,
+            1.0,
+            f"Ranges excluded: {text}",
+            transform=ax.transAxes,
+            verticalalignment="bottom",
+            horizontalalignment="left",
+        )
+
+    def _df_exclude_ranges_from_durations(
+        self,
+        status_changelog_with_durations: DataFrame,
+        excludes: list[DateTimeRange] | None = None,
+    ) -> DataFrame:
+        if excludes is None:
+            return status_changelog_with_durations
+
+        self._validate_exclude_ranges(excludes)
+
+        df = (
+            status_changelog_with_durations.copy()
+        )  # Avoid modifying the original DataFrame
+        for range in excludes:
+            if range.start_datetime is None or range.end_datetime is None:
+                raise ValueError(
+                    "Both start_datetime and end_datetime must be provided in the DateTimeRange."
+                )
+
+            # Create boolean mask for overlapping ranges
+            mask = (df["start_time"] <= range.end_datetime) & (
+                df["end_time"] >= range.start_datetime
+            )
+
+            if mask.any():
+                start = df.loc[mask, "start_time"]
+                lower_bound = pd.Timestamp(range.start_datetime)
+                overlap_start = start.where(start >= lower_bound, lower_bound)
+
+                end = df.loc[mask, "end_time"]
+                upper_bound = pd.Timestamp(range.end_datetime)
+                overlap_end = end.where(end <= upper_bound, upper_bound)
+
+                # Calculate overlap duration and subtract from original duration
+                overlap_duration = (
+                    (overlap_end - overlap_start).dt.total_seconds()
+                ).astype(int)
+
+                df.loc[mask, "duration"] -= overlap_duration
+
+        return df
