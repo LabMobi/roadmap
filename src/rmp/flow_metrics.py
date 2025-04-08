@@ -812,7 +812,6 @@ class FlowMetrics:
                 for p in pace_q.index.sort_values(ascending=False):
                     h = pace_q.loc[p].ceil("D").days
                     ax.bar(0.5, h, color=pace_colors.pop())
-                    ax.annotate(f"{h}", (0, h))
 
             # Filter data for this status
             df_status = wip_age_df[wip_age_df["current_status"] == status]
