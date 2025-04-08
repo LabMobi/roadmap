@@ -199,87 +199,62 @@ class FlowMetrics:
 
         return earliest_selected
 
-    def _select_status_changelog_with_durations(
+    def _select_status_changelog(
         self,
         only_hierarchy_levels: set[int] = {0},
     ) -> Select[tuple[Any, ...]]:
-        end_time = func.coalesce(
-            ItemStatusChangelog.end_time, datetime.now().replace(microsecond=0)
-        ).label("end_time")
-        duration = (
-            func.strftime("%s", end_time)
-            - func.strftime("%s", ItemStatusChangelog.start_time)
-        ).label("duration")
-
-        with_duration = select(
+        with_changelog = select(
             ItemStatusChangelog.item_id,
             ItemStatusChangelog.status,
             ItemStatusChangelog.start_time,
-            end_time,
-            duration,
-            # Item.identifier,
-            # Item.hierarchy_level
-        ).cte("_duration")
+            func.coalesce(
+                ItemStatusChangelog.end_time,
+                datetime.now(),
+            ).label("end_time"),
+        ).cte("_changelog")
 
-        # If status has some duration, consider this as effective status
-        # this helps to figure out last active status
-        with_mark_eff_status = select(
-            with_duration,
-            case((with_duration.c.duration > 0, True), else_=False).label(
-                "effective_status"
-            ),
-        ).cte("_mark_effective_status")
-
-        # Rank effective statuses over time with an intetion to find the last one
-        rank_eff_status = (
+        # Rank statuses over time with an intention to find the last one
+        rank_status = (
             func.rank()
             .over(
-                partition_by=[
-                    with_mark_eff_status.c.item_id,
-                    with_mark_eff_status.c.effective_status,
-                ],
-                order_by=with_mark_eff_status.c.start_time.desc(),
+                partition_by=[with_changelog.c.item_id],
+                order_by=with_changelog.c.start_time.desc(),
             )
-            .label("rank_eff_status")
+            .label("rank_status")
         )
-        # The first ranked effective status is the last effective status
-        last_eff_status = case(
-            (
-                and_(
-                    rank_eff_status == 1,
-                    with_mark_eff_status.c.effective_status,
-                ),
-                with_mark_eff_status.c.status,
-            ),
+
+        # The first ranked status is the last status
+        last_status = case(
+            (rank_status == 1, with_changelog.c.status),
             else_=None,
-        ).label("last_eff_status")
+        ).label("last_status")
         last_finished_time = case(
             (
-                last_eff_status.in_(self._workflow._finished),
-                with_mark_eff_status.c.start_time,
+                last_status.in_(self._workflow._finished),
+                with_changelog.c.start_time,
             )
         ).label("last_finished_time")
 
-        with_last_eff_status = select(
-            with_mark_eff_status,
-            rank_eff_status,
-            last_eff_status,
+        with_last_status = select(
+            with_changelog,
+            rank_status,
+            last_status,
             last_finished_time,
-        ).cte("_last_eff_status")
+        ).cte("_last_status")
 
         # Propagate current status to all rows for item
         current_status = (
-            func.max(with_last_eff_status.c.last_eff_status)
-            .over(partition_by=with_last_eff_status.c.item_id)
+            func.max(with_last_status.c.last_status)
+            .over(partition_by=with_last_status.c.item_id)
             .label("current_status")
         )
         finished_time = (
-            func.max(with_last_eff_status.c.last_finished_time)
-            .over(partition_by=with_last_eff_status.c.item_id)
+            func.max(with_last_status.c.last_finished_time)
+            .over(partition_by=with_last_status.c.item_id)
             .label("finished_time")
         )
         with_current_status = select(
-            with_last_eff_status,
+            with_last_status,
             current_status,
             finished_time,
         ).cte("_current_status")
@@ -290,28 +265,6 @@ class FlowMetrics:
             .join(Item, Item.id == with_current_status.c.item_id)
             .where(Item.hierarchy_level.in_(only_hierarchy_levels))
         )
-        return stmt
-
-    def _select_status_durations(
-        self, current_statuses: list[str]
-    ) -> Select[tuple[Any, ...]]:
-        stmt = self._select_status_changelog_with_durations()
-
-        stmt = (
-            select(
-                stmt.c.item_id,
-                stmt.c.status,
-                func.sum(stmt.c.duration).label("duration"),
-                func.max(stmt.c.finished_time).label("finished_time"),
-                stmt.c.item_identifier,
-            )
-            .where(
-                stmt.c.current_status.in_(current_statuses),
-                stmt.c.status.in_(self._workflow._in_progress),
-            )
-            .group_by(stmt.c.item_id, stmt.c.status)
-        )
-
         return stmt
 
     def _select_backlog_items(
@@ -361,10 +314,9 @@ class FlowMetrics:
             .rename(columns={"duration": "cycle_time"})
             .reset_index()
         )
-        ct_df["cycle_time"] = ct_df["cycle_time"] / 60 / 60 / 24
 
-        # Drop rows with zero cycle time, this can happen due to exclude ranges canceling out durations
-        ct_df = ct_df[ct_df["cycle_time"] > 0]
+        # Drop rows with zero cycle time, this normal when exclude ranges cancel out durations
+        ct_df = ct_df[ct_df["cycle_time"] != pd.Timedelta(0)].reset_index(drop=True)
 
         return ct_df
 
@@ -389,7 +341,7 @@ class FlowMetrics:
             .rename(columns={"duration": "cycle_time"})
             .reset_index()
         )
-        ct_status_df["cycle_time"] = ct_status_df["cycle_time"] / 60 / 60 / 24
+
         return ct_status_df
 
     def df_wip_age(self, status_changelog_with_durations: DataFrame) -> DataFrame:
@@ -404,7 +356,7 @@ class FlowMetrics:
             .rename(columns={"duration": "wip_age"})
             .reset_index()
         )
-        wip_age_df["wip_age"] = (wip_age_df["wip_age"] / 60 / 60 / 24).apply(np.ceil)
+
         return wip_age_df
 
     def df_workflow_cum_arrivals(
@@ -461,12 +413,16 @@ class FlowMetrics:
     def df_status_changelog_with_durations(
         self, only_hierarchy_levels: set[int] = {0}
     ) -> DataFrame:
-        return pd.read_sql(
-            sql=self._select_status_changelog_with_durations(
+        df = pd.read_sql(
+            sql=self._select_status_changelog(
                 only_hierarchy_levels=only_hierarchy_levels
             ),
             con=self._engine,
         )
+
+        df["duration"] = df["end_time"] - df["start_time"]
+
+        return df
 
     def df_throughput(
         self,
@@ -712,7 +668,7 @@ class FlowMetrics:
 
         ax.scatter(
             x=ct_df["finished_time"],
-            y=ct_df["cycle_time"],
+            y=ct_df["cycle_time"].dt.ceil("D").dt.days,
             label="Cycle Time (days)",
         )
 
@@ -723,14 +679,15 @@ class FlowMetrics:
         if annotate_item_ids:
             for _, row in ct_df.iterrows():
                 ax.annotate(
-                    row["item_identifier"], (row["finished_time"], row["cycle_time"])
+                    row["item_identifier"],
+                    (row["finished_time"], row["cycle_time"].ceil("D").days),
                 )
 
         # Plot cycle time quantiles
         min_finished = ct_df["finished_time"].min()
         max_finished = ct_df["finished_time"].max()
         for p in ct_q.index:
-            ct_q_value = math.ceil(ct_q[p])
+            ct_q_value = ct_q[p].ceil("D").days
             ax.plot((min_finished, max_finished), (ct_q_value, ct_q_value), "--")
             ax.annotate(f"{ct_q_value}", (min_finished, ct_q_value))
             ax.annotate(f"{int(p * 100)}%", (max_finished, ct_q_value))
@@ -754,15 +711,16 @@ class FlowMetrics:
         # Calculate quantile values for cycle time, useful for forecasting single item cycle time
         ct_q = ct_df["cycle_time"].quantile([p / 100 for p in percentiles])
 
-        cycle_times = np.ceil(ct_df["cycle_time"])  # .astype(int)
+        cycle_times = ct_df["cycle_time"].dt.ceil("D").dt.days
         fig = plt.figure(figsize=(16, 9))
         ax = fig.subplots()
         ax.hist(cycle_times, bins=int(cycle_times.max()))
         ax.yaxis.set_major_locator(tck.MultipleLocator())
 
         for p in ct_q.index:
+            ct_q_value = ct_q[p].ceil("D").days
             ax.plot(
-                (ct_q[p], ct_q[p]),
+                (ct_q_value, ct_q_value),
                 [0, cycle_times.value_counts().max()],
                 label=f"{int(p * 100)}%",
             )
@@ -803,18 +761,19 @@ class FlowMetrics:
         statuses = self._workflow._in_progress + self._workflow._finished
 
         # Calculate the plot max height
-        plot_h = max(wip_age_df["wip_age"].max(), ct_q.max()) * 1.1
+        plot_h = max(wip_age_df["wip_age"].max(), ct_q.max()).days * 1.1
 
         fig = plt.figure(figsize=(16, 9))
         index = 0
         include_statuses = []
+
         for status in statuses:
             index += 1
-
             # For each status, add subplot
             ax = fig.add_subplot(1, len(statuses), index)
             ax.set_xlabel(status)
             ax.set_xticks([])
+
             ax.set_ylim(bottom=0, top=plot_h)
 
             if index == 1:
@@ -851,7 +810,7 @@ class FlowMetrics:
 
                 # Cover the red bar with rest of pace percentiles
                 for p in pace_q.index.sort_values(ascending=False):
-                    h = math.ceil(pace_q.loc[p])
+                    h = pace_q.loc[p].ceil("D").days
                     ax.bar(0.5, h, color=pace_colors.pop())
                     ax.annotate(f"{h}", (0, h))
 
@@ -860,13 +819,17 @@ class FlowMetrics:
 
             # Plot items
             df_status["x"] = 0.5
-            ax.scatter(df_status["x"], df_status["wip_age"])
+            ax.scatter(df_status["x"], df_status["wip_age"].dt.ceil("D").dt.days)
             for _, row in df_status.reset_index().iterrows():
-                ax.annotate(row["item_identifier"], (row["x"], row["wip_age"]))
+                ax.annotate(
+                    row["item_identifier"],
+                    (row["x"], row["wip_age"].ceil("D").days),
+                )
 
+            # return ct_q
             # Plot cycle time quantiles
             for p in ct_q.index:
-                ct_q_value = math.ceil(ct_q[p])
+                ct_q_value = ct_q[p].ceil("D").days
                 ax.plot(
                     [0, 1], [ct_q_value, ct_q_value], "--", color="gray", label=str(p)
                 )
@@ -891,21 +854,20 @@ class FlowMetrics:
             self._highlight_exclude_ranges(
                 ax, highlight_exclude_ranges, "Excluded ranges"
             )
-
-        ax.legend()
+            ax.legend()
 
     def plot_monte_carlo_when_hist(
         self,
         percentiles: list[int] = [50, 85, 95],
         runs: int = 10000,
         item_count: int = 10,
-        excludes_finished_at: list[DateTimeRange] | None = None,
+        exclude_ranges: list[DateTimeRange] | None = None,
         only_hierarchy_levels: set[int] = {0},
     ) -> None:
         s = self.df_monte_carlo_when(
             runs=runs,
             item_count=item_count,
-            exclude_ranges=excludes_finished_at,
+            exclude_ranges=exclude_ranges,
             only_hierarchy_levels=only_hierarchy_levels,
         )
 
@@ -924,8 +886,8 @@ class FlowMetrics:
 
         ax.set_xticks(p_dates)
 
-        if excludes_finished_at:
-            self._annotate_exclude_ranges(ax, excludes_finished_at)
+        if exclude_ranges:
+            self._annotate_exclude_ranges(ax, exclude_ranges)
         ax.legend()
 
     def plot_monte_carlo_how_many_hist(
@@ -1078,9 +1040,7 @@ class FlowMetrics:
                 overlap_end = end.where(end <= upper_bound, upper_bound)
 
                 # Calculate overlap duration and subtract from original duration
-                overlap_duration = (
-                    (overlap_end - overlap_start).dt.total_seconds()
-                ).astype(int)
+                overlap_duration = overlap_end - overlap_start
 
                 df.loc[mask, "duration"] -= overlap_duration
 
