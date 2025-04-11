@@ -1,5 +1,4 @@
 from __future__ import annotations  # https://github.com/pandas-dev/pandas/issues/54494
-import math
 from typing import Any, List
 from matplotlib import pyplot as plt
 from matplotlib import dates as mdates
