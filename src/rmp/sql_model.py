@@ -19,11 +19,25 @@ class Config(Base):
     value: Mapped[str] = mapped_column()
     data_source_id: Mapped[int] = mapped_column(ForeignKey("data_source.id"))
 
-    # Define the relationship to Source
-    # source: Mapped["Source"] = relationship("Source", back_populates="configs")
-
     def __repr__(self) -> str:
         return f"Config(id={self.id!r}, key={self.key!r}, value={self.value!r})"
+
+
+class Option(Base):
+    __tablename__ = "option"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    key: Mapped[str] = mapped_column()
+    value: Mapped[str] = mapped_column()
+    data_source_id: Mapped[int] = mapped_column(ForeignKey("data_source.id"))
+
+    # Define the relationship to DataSource
+    data_source: Mapped["DataSource"] = relationship(
+        "DataSource", back_populates="options"
+    )
+
+    def __repr__(self) -> str:
+        return f"Option(id={self.id!r}, key={self.key!r}, value={self.value!r})"
 
 
 class DataSource(Base):
@@ -36,6 +50,7 @@ class DataSource(Base):
     # Define the relationship to SourceConfig
     # configs: Mapped[list["SourceConfig"]] = relationship("SourceConfig", back_populates="source")
     configs: Mapped[list["Config"]] = relationship()
+    options: Mapped[list["Option"]] = relationship()
 
     # Define the relationship to Item
     # items: Mapped[list["Item"]] = relationship("Item", back_populates="source")

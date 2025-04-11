@@ -23,7 +23,8 @@ os.environ['SQLALCHEMY_URL'] = 'sqlite:///my_db.sqlite'
 backend = Backend()
 
 # Load data
-connector = JiraCloudConnector(
+backend.add_connector(
+    JiraCloudConnector,
     name='Jira Loader',
     domain='example',
     username='john.doe@example.com',
@@ -31,7 +32,7 @@ connector = JiraCloudConnector(
     jql = 'project = SPACE',
     board_id = 42
 )
-backend.load_connector_data(connector)
+backend.load_data()
 ```
 
 ### Analyze Flow Metrics

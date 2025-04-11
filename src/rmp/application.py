@@ -214,12 +214,12 @@ class MilestoneDataSourceApplication(Application):
         url: str,
         identifier: str,
         name: str,
-        description: str,
         released: bool,
+        description: str | None = None,
         release_date: datetime | None = None,
     ) -> UUID:
         milestone = Milestone.create(
-            url, identifier, name, description, released, release_date
+            url, identifier, name, released, description, release_date
         )
         self.save(milestone)
         return milestone.id
@@ -229,8 +229,8 @@ class MilestoneDataSourceApplication(Application):
         url: str,
         identifier: str,
         name: str,
-        description: str,
         released: bool,
+        description: str | None = None,
         release_date: datetime | None = None,
     ) -> UUID:
         try:

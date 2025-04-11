@@ -351,18 +351,18 @@ class Milestone(Aggregate):
         url: str
         identifier: str
         name: str
-        description: str
-        release_date: datetime
         released: bool
+        description: str | None
+        release_date: datetime | None
 
     class NameChanged(Aggregate.Event):
         name: str
 
     class DescriptionChanged(Aggregate.Event):
-        description: str
+        description: str | None
 
     class ReleaseDateChanged(Aggregate.Event):
-        release_date: datetime
+        release_date: datetime | None
 
     class ReleasedStateChanged(Aggregate.Event):
         released: bool
@@ -373,8 +373,8 @@ class Milestone(Aggregate):
         url: str,
         identifier: str,
         name: str,
-        description: str,
         released: bool,
+        description: str | None = None,
         release_date: datetime | None = None,
     ) -> Milestone:
         return cls._create(
@@ -382,8 +382,8 @@ class Milestone(Aggregate):
             url=url,
             identifier=identifier,
             name=name,
-            description=description,
             released=released,
+            description=description,
             release_date=release_date,
         )
 
@@ -392,7 +392,11 @@ class Milestone(Aggregate):
         return uuid5(NAMESPACE_URL, url)
 
     def update(
-        self, name: str, description: str, released: bool, release_date: datetime | None
+        self,
+        name: str,
+        released: bool,
+        release_date: datetime | None,
+        description: str | None,
     ) -> None:
         if self.name != name:
             self.trigger_event(self.NameChanged, name=name)
@@ -412,9 +416,9 @@ class Milestone(Aggregate):
         self.url: str = event.url
         self.identifier: str = event.identifier
         self.name: str = event.name
-        self.description: str = event.description
-        self.release_date: datetime = event.release_date
         self.released: bool = event.released
+        self.description: str | None = event.description
+        self.release_date: datetime | None = event.release_date
 
     @apply.register
     def _(self, event: Milestone.NameChanged) -> None:

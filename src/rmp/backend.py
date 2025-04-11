@@ -4,7 +4,7 @@ from typing import List, Type
 import typing
 from eventsourcing.system import System, SingleThreadedRunner
 from eventsourcing_sqlalchemy.recorders import SQLAlchemyProcessRecorder
-from sqlalchemy import delete, select
+from sqlalchemy import Connection, Engine, delete, select
 
 from rmp.application import (
     ItemDataSourceApplication,
@@ -19,6 +19,7 @@ from rmp.sql_model import (
     Item,
     ItemStatusChangelog,
     Milestone,
+    Option,
     Sprint,
 )
 from sqlalchemy.orm import Session
@@ -26,8 +27,22 @@ from sqlalchemy.orm import joinedload
 from abc import ABC, abstractmethod
 
 
+class OptionStorage(ABC):
+    @abstractmethod
+    def set_option(self, key: str, value: str) -> None:
+        pass
+
+    @abstractmethod
+    def get_option(self, key: str) -> str | None:
+        pass
+
+
 class DataSourceConnector(ABC):
-    def __init__(self, name: str, **config: dict[str, str]):
+    def __init__(
+        self,
+        name: str,
+        **config: dict[str, str],
+    ):
         self.name = name
         self.config = config
 
@@ -42,6 +57,43 @@ class DataSourceConnector(ABC):
     @abstractmethod
     def load_items(self, app: ItemDataSourceApplication) -> None:
         pass
+
+    def set_option_storage(self, option_storage: OptionStorage) -> None:
+        self.option_storage = option_storage
+
+
+class SqlAlchemyOptionStorage(OptionStorage):
+    def __init__(self, engine: Engine | Connection, data_source: DataSource) -> None:
+        self.engine = engine
+        self.data_source = data_source
+
+    def set_option(self, key: str, value: str) -> None:
+        with Session(self.engine) as session:
+            stmt = select(Option).where(
+                Option.key == key, Option.data_source_id == self.data_source.id
+            )
+            existing = session.scalars(stmt).one_or_none()
+            if existing:
+                existing.value = value
+            else:
+                option = Option(
+                    key=key,
+                    value=value,
+                )
+                option.data_source = self.data_source
+                session.add(option)
+            session.commit()
+
+    def get_option(self, key: str) -> str | None:
+        with Session(self.engine) as session:
+            stmt = select(Option).where(
+                Option.key == key, Option.data_source_id == self.data_source.id
+            )
+            existing = session.scalars(stmt).one_or_none()
+            if existing:
+                return existing.value
+
+            return None
 
 
 class Backend:
@@ -64,9 +116,10 @@ class Backend:
 
         # Get engine/bind, assuming the use of sqlalchemy persistence module
         recorder = typing.cast(SQLAlchemyProcessRecorder, self._item_app.recorder)
-        self._engine = recorder.datastore.engine
-        if self._engine is None:
+        if recorder.datastore.engine is None:
             raise RuntimeError("Database engine could not be initialized")
+
+        self._engine = recorder.datastore.engine
 
         # Create other tables
         Base.metadata.create_all(self._engine)
@@ -102,9 +155,9 @@ class Backend:
 
             connectors: List[DataSourceConnector] = []
             for data_source in data_sources:
-                kwargs = dict()
+                config_kv = dict()
                 for config in data_source.configs:
-                    kwargs[config.key] = config.value
+                    config_kv[config.key] = config.value
                 module = importlib.import_module(data_source.connector_module)
                 class_ = getattr(module, data_source.connector_class)
 
@@ -113,13 +166,15 @@ class Backend:
                         f"Class '{data_source.connector_class}' does not inherit from DataSourceConnector"
                     )
 
-                connector = class_(**kwargs)
+                option_storage = SqlAlchemyOptionStorage(self._engine, data_source)
+                connector = class_(data_source.name, **config_kv)
+                connector.set_option_storage(option_storage)
                 connectors.append(connector)
 
         for connector in connectors:
-            self.load_connector_data(connector)
+            self._load_connector_data(connector)
 
-    def load_connector_data(self, connector: DataSourceConnector) -> None:
+    def _load_connector_data(self, connector: DataSourceConnector) -> None:
         connector.load_milestones(self._milestone_app)
         connector.load_sprints(self._sprint_app)
         connector.load_items(self._item_app)

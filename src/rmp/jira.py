@@ -243,7 +243,9 @@ class JiraCloudConnector(DataSourceConnector):
                 url=version["self"],
                 identifier=version["id"],
                 name=version["name"],
-                description=version["description"],
+                description=(
+                    version["description"] if "description" in version else None
+                ),
                 released=version["released"],
                 release_date=release_date,
             )
@@ -280,6 +282,17 @@ class JiraCloudConnector(DataSourceConnector):
 
     @override
     def load_items(self, app: ItemDataSourceApplication) -> None:
+        last_updated_str = self.option_storage.get_option("last_updated_milliseconds")
+
+        jql = self._jql
+        if last_updated_str:
+            # The search results will be relative configured time zone (which is by default the Jira server's time zone).
+            # To ensure we do not miss any updates, we'll query all 24h earlier updates again.
+            last_updated_milliseconds = int(last_updated_str) - 1000 * 60 * 60 * 24
+            jql = f"{self._jql} AND updated >= {last_updated_milliseconds}"
+
+        last_updated_milliseconds = int(datetime.now(pytz.utc).timestamp() * 1000)
+
         items = self._jira_requests.post(
             self.PATH_SEARCH_ISSUES,
             params={
@@ -292,7 +305,7 @@ class JiraCloudConnector(DataSourceConnector):
                     self.SPRINTS_FIELD,
                     self.FIX_VERSIONS_FIELD,
                 ],
-                "jql": self._jql,
+                "jql": jql,
             },
             paged_data_key="issues",
             progress_desc="Loading Jira issues",
@@ -543,3 +556,7 @@ class JiraCloudConnector(DataSourceConnector):
                     last_changelog_timestamp,
                     changelog_tracking_id=changelog_tracking_id,
                 )
+
+        self.option_storage.set_option(
+            "last_updated_milliseconds", str(last_updated_milliseconds)
+        )
