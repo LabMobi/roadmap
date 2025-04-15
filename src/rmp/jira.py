@@ -291,6 +291,7 @@ class JiraCloudConnector(DataSourceConnector):
             last_updated_milliseconds = int(last_updated_str) - 1000 * 60 * 60 * 24
             jql = f"{self._jql} AND updated >= {last_updated_milliseconds}"
 
+        print(jql)
         last_updated_milliseconds = int(datetime.now(pytz.utc).timestamp() * 1000)
 
         items = self._jira_requests.post(
@@ -329,6 +330,10 @@ class JiraCloudConnector(DataSourceConnector):
             )
 
             url = item["self"]
+
+            # Changelog does contain event for rank change, but actual value is stored only in the issue, so we do not have
+            # historical ranking changelog available.
+            rank = item["fields"][self.RANK_FIELD]
 
             if not existing_item:
                 initial_summary = None
@@ -445,10 +450,6 @@ class JiraCloudConnector(DataSourceConnector):
                     .replace(tzinfo=None)
                 )
 
-                # Changelog does contain event for rank change, but actual value is stored only in the issue, so we do not have
-                # historical ranking changelog available.
-                rank = item["fields"][self.RANK_FIELD]
-
                 app.create_item(
                     url,
                     timestamp,
@@ -549,6 +550,17 @@ class JiraCloudConnector(DataSourceConnector):
                             raise ValueError(
                                 f"Unexpected changelog state for {self.FIX_VERSIONS_FIELD} field"
                             )
+
+                    if (
+                        "fieldId" in changelog_item
+                        and changelog_item["fieldId"] == self.RANK_FIELD
+                    ):
+                        app.change_rank(
+                            url,
+                            timestamp,
+                            rank,
+                            changelog_tracking_id=changelog_tracking_id,
+                        )
 
             if last_changelog_timestamp:
                 app.set_changelog_tracking_id(
