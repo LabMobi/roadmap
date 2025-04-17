@@ -289,7 +289,7 @@ class JiraCloudConnector(DataSourceConnector):
             # The search results will be relative configured time zone (which is by default the Jira server's time zone).
             # To ensure we do not miss any updates, we'll query all 24h earlier updates again.
             last_updated_milliseconds = int(last_updated_str) - 1000 * 60 * 60 * 24
-            jql = f"{self._jql} AND updated >= {last_updated_milliseconds}"
+            jql = f"{self._jql} AND (updated >= {last_updated_milliseconds} OR created >= {last_updated_milliseconds})"
 
         print(jql)
         last_updated_milliseconds = int(datetime.now(pytz.utc).timestamp() * 1000)

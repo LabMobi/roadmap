@@ -247,9 +247,9 @@ class MilestoneDataSourceApplication(Application):
 
         milestone.update(
             name=name,
-            description=description,
             released=released,
             release_date=release_date,
+            description=description,
         )
         self.save(milestone)
         return milestone.id
