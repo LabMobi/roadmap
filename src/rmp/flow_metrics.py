@@ -269,29 +269,71 @@ class FlowMetrics:
     def _select_backlog_items(
         self, only_hierarchy_levels: set[int] = {0}
     ) -> Select[tuple[Any, ...]]:
-        stmt = (
-            select(
-                Item,
-                Sprint.name.label("sprint_name"),
-                Sprint.state.label("sprint_state"),
-                Sprint.order.label("sprint_order"),
-                Milestone.name.label("milestone_name"),
-            )
-            .select_from(Item)
-            .outerjoin(sprint_item_association)
-            .outerjoin(Sprint)
-            .outerjoin(milestone_item_association)
-            .outerjoin(Milestone)
-            .order_by(Sprint.order.nulls_last(), Item.rank)
+        backlog_items = (
+            select(Item)
+            .order_by(Item.rank)
             .where(
                 Item.hierarchy_level.in_(only_hierarchy_levels),
                 Item.status.in_(
                     self._workflow._not_started + self._workflow._in_progress
                 ),
-                or_(Sprint.state != "closed", Sprint.state.is_(None)),
             )
+        ).cte("_backlog_items")
+
+        sprint_joined = (
+            select(
+                backlog_items,
+                Sprint.name.label("sprint_name"),
+                Sprint.state.label("sprint_state"),
+                Sprint.order.label("sprint_order"),
+            )
+            .select_from(backlog_items)
+            # This condition can produce multiple rows for the same item
+            # if the item has been in multiple sprints
+            .outerjoin(sprint_item_association)
+            .outerjoin(
+                Sprint,
+                and_(
+                    sprint_item_association.c.sprint_id == Sprint.id,
+                    Sprint.state != "closed",
+                ),
+            )
+            .order_by(Sprint.order.nulls_last(), backlog_items.c.rank)
+        ).cte("_sprint_joined")
+
+        # Select only distinct items, since previously there could be multiple ross for same item
+        distinct_items = (
+            select(
+                func.max(sprint_joined.c.id).label("id"),
+                func.max(sprint_joined.c.identifier).label("identifier"),
+                func.max(sprint_joined.c.url).label("url"),
+                func.max(sprint_joined.c.status).label("status"),
+                func.max(sprint_joined.c.hierarchy_level).label("hierarchy_level"),
+                func.max(sprint_joined.c.rank).label("rank"),
+                func.max(sprint_joined.c.summary).label("summary"),
+                func.max(sprint_joined.c.created_time).label("created_time"),
+                func.max(sprint_joined.c.sprint_name).label("sprint_name"),
+                func.max(sprint_joined.c.sprint_order).label("sprint_order"),
+                func.max(sprint_joined.c.sprint_state).label("sprint_state"),
+            )
+            .group_by(sprint_joined.c.id)
+            .cte("_distinct_items")
         )
-        return stmt
+
+        milestone_joined = (
+            select(
+                distinct_items,
+                Milestone.name.label("milestone_name"),
+            )
+            .select_from(distinct_items)
+            .outerjoin(
+                milestone_item_association,
+                milestone_item_association.c.item_id == distinct_items.c.id,
+            )
+            .outerjoin(Milestone)
+        )
+
+        return milestone_joined
 
     def df_cycle_time(self, status_changelog_with_durations: DataFrame) -> DataFrame:
         df = status_changelog_with_durations
@@ -581,7 +623,7 @@ class FlowMetrics:
             con=self._engine,
         )
 
-        # Doing the grouping with DataFrame (not with SQL) as it allows to convert
+        # Doing the grouping with Pandas (not with SQL) as it allows to convert
         # multiple milestone names into list data type directly
         df = (
             df.groupby(
@@ -594,8 +636,12 @@ class FlowMetrics:
                     "rank",
                 ],
                 dropna=False,
-            )["milestone_name"]
-            .apply(lambda x: list(filter(None, x)) or None)
+            )
+            .agg(
+                {
+                    "milestone_name": lambda x: list(filter(None, x)) or None,
+                }
+            )
             .reset_index()
         )
         df = df.sort_values(
