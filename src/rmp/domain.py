@@ -21,6 +21,7 @@ class Item(Aggregate):
         rank: str
         sprints: list[int]
         milestones: list[int]
+        item_type: str | None
 
     class SummaryChanged(Aggregate.Event):
         changelog_tracking_id: int
@@ -38,6 +39,10 @@ class Item(Aggregate):
     class RankChanged(Aggregate.Event):
         changelog_tracking_id: int
         rank: str
+
+    class TypeChanged(Aggregate.Event):
+        changelog_tracking_id: int
+        item_type: str | None
 
     class SprintAdded(Aggregate.Event):
         changelog_tracking_id: int
@@ -74,6 +79,7 @@ class Item(Aggregate):
         rank: str,
         sprints: list[str],
         milestones: list[str],
+        item_type: str | None,
     ) -> Item:
         return cls._create(
             cls.Created,
@@ -86,6 +92,7 @@ class Item(Aggregate):
             rank=rank,
             sprints=sprints,
             milestones=milestones,
+            item_type=item_type,
         )
 
     @classmethod
@@ -208,6 +215,19 @@ class Item(Aggregate):
             changelog_tracking_id=changelog_tracking_id,
         )
 
+    def change_type(
+        self,
+        timestamp: datetime,
+        item_type: str | None,
+        changelog_tracking_id: int | None = None,
+    ) -> None:
+        self.trigger_event(
+            self.TypeChanged,
+            timestamp=timestamp,
+            changelog_tracking_id=changelog_tracking_id,
+            item_type=item_type,
+        )
+
     @singledispatchmethod
     def apply(self, event: Event) -> None:
         """Applies event to aggregate."""
@@ -222,6 +242,7 @@ class Item(Aggregate):
         self.rank = event.rank
         self.sprints = event.sprints
         self.milestones = event.milestones
+        self.item_type = event.item_type
         self.changelog_tracking_id: int | None = None
 
     @apply.register
@@ -269,6 +290,11 @@ class Item(Aggregate):
     @apply.register
     def _(self, event: Item.ChangelogTrackingIdSet) -> None:
         self.changelog_tracking_id = event.changelog_tracking_id
+
+    @apply.register
+    def _(self, event: Item.TypeChanged) -> None:
+        self.changelog_tracking_id = event.changelog_tracking_id
+        self.item_type = event.item_type
 
 
 class Sprint(Aggregate):

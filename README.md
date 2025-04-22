@@ -39,7 +39,7 @@ backend.load_data()
 
 ```python
 from sqlalchemy import create_engine
-from rmp.flow_metrics import FlowMetrics, Workflow
+from rmp.flow_metrics import FlowMetrics, Workflow, FilterKwArgs
 from datetime import datetime
 
 # Create engine for data access
@@ -52,39 +52,43 @@ workflow = Workflow(
     finished=['Done', 'Cancelled'],
 )
 
+# Define filters
+filter = FilterKwArgs(
+    exclude_item_types={"Bug"},
+    include_hierarchy_levels={0},
+    exclude_ranges=[
+        DateTimeRange("2024-12-23", "2025-01-05"), # Christmas period, team offline
+        DateTimeRange("2025-04-14", "2025-04-21"), # Holy Week, most of the team away
+    ]
+)
+
 # Create instance of FlowMetrics
 fm = FlowMetrics(engine, workflow)
 
-# Define time ranges to exclude from analytics
-excludes = [
-    DateTimeRange("2024-12-23", "2025-01-05"), # Christmas period, team offline
-    DateTimeRange("2025-04-14", "2025-04-21"), # Holy Week, most of the team away
-]
-
 # Plot cycle time scatter chart
-fm.plot_cycle_time_scatter(exclude_ranges=excludes)
+fm.plot_cycle_time_scatter(**filter)
 
 # Plot cycle time histogram
-fm.plot_cycle_time_histogram(exclude_ranges=excludes)
+fm.plot_cycle_time_histogram(**filter)
 
 # Plot aging work in progress chart
-fm.plot_aging_wip(exclude_ranges=excludes)
+fm.plot_aging_wip(**filter)
 
 # Plot throughput run chart
-fm.plot_throughput_run_chart(exclude_ranges=excludes)
+fm.plot_throughput_run_chart(**filter)
 
 # Plot cumulative flow diagram
-fm.plot_cfd(highlight_ranges=excludes)
+fm.plot_cfd(**filter)
 
 # Find dates and probabilities to deliver 90 items using Monte Carlo simulation
-fm.plot_monte_carlo_when_hist(runs=10000, item_count=90, exclude_ranges=excludes)
+fm.plot_monte_carlo_when_hist(runs=10000, item_count=90, **filter)
 
 # Find how many items can be delivered by date with their probabilities using Monte Carlo simulation
 target_date = datetime.now() + pd.Timedelta(days=30)
-fm.plot_monte_carlo_how_many_hist(runs=10000, target_date=target_date, exclude_ranges=excludes)
+fm.plot_monte_carlo_how_many_hist(runs=10000, target_date=target_date, **filter)
 
 # Output prioritised backlog with 85% confidence forecast of delivery dates  
-fm.df_backlog_items(mc_when=True, mc_when_runs=1000, mc_when_percentile=85, exclude_ranges=excludes)
+fm.df_backlog_items(mc_when=True, mc_when_runs=1000, mc_when_percentile=85, **filter)
 ```
 
 ## Development

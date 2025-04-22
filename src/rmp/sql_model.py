@@ -68,6 +68,7 @@ class Item(Base):
     hierarchy_level: Mapped[int] = mapped_column()
     rank: Mapped[str] = mapped_column()
     summary: Mapped[str] = mapped_column()
+    item_type: Mapped[str] = mapped_column(String(16), nullable=True)
     created_time: Mapped[datetime.datetime] = mapped_column()
     # data_source_id: Mapped[int] = mapped_column(ForeignKey("data_source.id"))
 

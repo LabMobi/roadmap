@@ -1,12 +1,12 @@
 from __future__ import annotations  # https://github.com/pandas-dev/pandas/issues/54494
-from typing import Any, List
+from typing import Any, List, TypedDict, Unpack
 from matplotlib import pyplot as plt
 from matplotlib import dates as mdates
 from matplotlib.axes import Axes
 import numpy as np
 import pandas as pd
 from pandas import DataFrame, Series, Timestamp
-from sqlalchemy import Engine, Select, and_, case, literal, or_
+from sqlalchemy import Engine, Select, and_, case, literal
 from sqlalchemy.orm import Session
 from rmp.sql_model import (
     Item,
@@ -22,6 +22,12 @@ from datetimerange import DateTimeRange
 import matplotlib.ticker as tck
 
 pd.options.mode.copy_on_write = True
+
+
+class FilterKwArgs(TypedDict, total=False):
+    include_hierarchy_levels: set[int] | None
+    exclude_item_types: set[str] | None
+    exclude_ranges: list[DateTimeRange] | None
 
 
 class Workflow:
@@ -46,30 +52,37 @@ class FlowMetrics:
         self._validate_workflow_statuses()
 
     def _select_status_changelog_distinct_arrival(
-        self,
-        only_hierarchy_levels: set[int] = {0},
+        self, **kwargs: Unpack[FilterKwArgs]
     ) -> Select[tuple[Any, ...]]:
-        with_only_hierarchy_levels = (
+        include_hierarchy_levels = kwargs.get("include_hierarchy_levels")
+        exclude_item_types = kwargs.get("exclude_item_types")
+
+        with_filtered = (
             select(
                 ItemStatusChangelog.item_id,
                 ItemStatusChangelog.start_time,
                 ItemStatusChangelog.status,
             )
             .join(Item, Item.id == ItemStatusChangelog.item_id)
-            .where(Item.hierarchy_level.in_(only_hierarchy_levels))
-        ).cte("_only_hierarchy_levels")
+            .where(
+                Item.hierarchy_level.in_(
+                    include_hierarchy_levels if include_hierarchy_levels else {0}
+                ),
+                Item.item_type.notin_(exclude_item_types if exclude_item_types else {}),
+            )
+        ).cte("_filtered")
 
         # Merge finished statuses into one since we are only interested of arrivals into
         # any of the finished statuses
         stmt = select(
-            with_only_hierarchy_levels.c.item_id,
-            with_only_hierarchy_levels.c.start_time,
+            with_filtered.c.item_id,
+            with_filtered.c.start_time,
             case(
                 (
-                    with_only_hierarchy_levels.c.status.in_(self._workflow._finished),
+                    with_filtered.c.status.in_(self._workflow._finished),
                     "/".join(self._workflow._finished),
                 ),
-                else_=with_only_hierarchy_levels.c.status,
+                else_=with_filtered.c.status,
             ).label("status"),
         ).cte("_merged_statuses")
 
@@ -200,7 +213,7 @@ class FlowMetrics:
 
     def _select_status_changelog(
         self,
-        only_hierarchy_levels: set[int] = {0},
+        **kwargs: Unpack[FilterKwArgs],
     ) -> Select[tuple[Any, ...]]:
         with_changelog = select(
             ItemStatusChangelog.item_id,
@@ -259,24 +272,39 @@ class FlowMetrics:
         ).cte("_current_status")
 
         # Join with item table for additional item information and final filtering
-        stmt = (
+        include_hierarchy_levels = kwargs.get("include_hierarchy_levels")
+        exclude_item_types = kwargs.get("exclude_item_types")
+
+        filtered = (
             select(with_current_status, Item.identifier.label("item_identifier"))
             .join(Item, Item.id == with_current_status.c.item_id)
-            .where(Item.hierarchy_level.in_(only_hierarchy_levels))
+            .where(
+                Item.hierarchy_level.in_(
+                    include_hierarchy_levels if include_hierarchy_levels else {0}
+                ),
+                Item.item_type.notin_(exclude_item_types if exclude_item_types else {}),
+            )
         )
-        return stmt
+
+        return filtered
 
     def _select_backlog_items(
-        self, only_hierarchy_levels: set[int] = {0}
+        self, **kwargs: Unpack[FilterKwArgs]
     ) -> Select[tuple[Any, ...]]:
+        include_hierarchy_levels = kwargs.get("include_hierarchy_levels")
+        exclude_item_types = kwargs.get("exclude_item_types")
+
         backlog_items = (
             select(Item)
             .order_by(Item.rank)
             .where(
-                Item.hierarchy_level.in_(only_hierarchy_levels),
+                Item.hierarchy_level.in_(
+                    include_hierarchy_levels if include_hierarchy_levels else {0}
+                ),
                 Item.status.in_(
                     self._workflow._not_started + self._workflow._in_progress
                 ),
+                Item.item_type.notin_(exclude_item_types if exclude_item_types else {}),
             )
         ).cte("_backlog_items")
 
@@ -306,6 +334,7 @@ class FlowMetrics:
             select(
                 func.max(sprint_joined.c.id).label("id"),
                 func.max(sprint_joined.c.identifier).label("identifier"),
+                func.max(sprint_joined.c.item_type).label("item_type"),
                 func.max(sprint_joined.c.url).label("url"),
                 func.max(sprint_joined.c.status).label("status"),
                 func.max(sprint_joined.c.hierarchy_level).label("hierarchy_level"),
@@ -403,12 +432,10 @@ class FlowMetrics:
     def df_workflow_cum_arrivals(
         self,
         include_not_started_statuses: bool = False,
-        only_hierarchy_levels: set[int] = {0},
+        **kwargs: Unpack[FilterKwArgs],
     ) -> DataFrame:
         df = pd.read_sql(
-            sql=self._select_status_changelog_distinct_arrival(
-                only_hierarchy_levels=only_hierarchy_levels
-            ),
+            sql=self._select_status_changelog_distinct_arrival(**kwargs),
             con=self._engine,
         )
 
@@ -452,12 +479,10 @@ class FlowMetrics:
         return df
 
     def df_status_changelog_with_durations(
-        self, only_hierarchy_levels: set[int] = {0}
+        self, **kwargs: Unpack[FilterKwArgs]
     ) -> DataFrame:
         df = pd.read_sql(
-            sql=self._select_status_changelog(
-                only_hierarchy_levels=only_hierarchy_levels
-            ),
+            sql=self._select_status_changelog(**kwargs),
             con=self._engine,
         )
 
@@ -468,20 +493,13 @@ class FlowMetrics:
     def df_throughput(
         self,
         resample_exclude_ranges: bool = True,
-        exclude_ranges: list[DateTimeRange] | None = None,
-        only_hierarchy_levels: set[int] = {0},
+        **kwargs: Unpack[FilterKwArgs],
     ) -> Series[int]:
-        df = self.df_cycle_time(
-            self.df_status_changelog_with_durations(
-                only_hierarchy_levels=only_hierarchy_levels
-            )
-        )
+        df = self.df_cycle_time(self.df_status_changelog_with_durations(**kwargs))
 
+        exclude_ranges = kwargs.get("exclude_ranges")
         if exclude_ranges:
-            # Convert finished_time to datetime if not already
-            df["finished_time"] = pd.to_datetime(df["finished_time"])
-
-            # Create a mask of rows to keep (not in any exclude range)
+            # Create a mask to keep rows not in any exclude range
             keep_mask = pd.Series(True, index=df.index)
             for exclude_range in exclude_ranges:
                 if (
@@ -525,14 +543,9 @@ class FlowMetrics:
         self,
         runs: int = 10000,
         item_count: int = 10,
-        exclude_ranges: list[DateTimeRange] | None = None,
-        only_hierarchy_levels: set[int] = {0},
+        **kwargs: Unpack[FilterKwArgs],
     ) -> Series[int]:
-        tp = self.df_throughput(
-            resample_exclude_ranges=False,
-            exclude_ranges=exclude_ranges,
-            only_hierarchy_levels=only_hierarchy_levels,
-        )
+        tp = self.df_throughput(resample_exclude_ranges=False, **kwargs)
 
         start_date = pd.Timestamp.now(tz=timezone.utc)
 
@@ -577,14 +590,9 @@ class FlowMetrics:
         self,
         target_date: datetime,
         runs: int = 10000,
-        exclude_ranges: list[DateTimeRange] | None = None,
-        only_hierarchy_levels: set[int] = {0},
+        **kwargs: Unpack[FilterKwArgs],
     ) -> Series[int]:
-        tp = self.df_throughput(
-            resample_exclude_ranges=False,
-            exclude_ranges=exclude_ranges,
-            only_hierarchy_levels=only_hierarchy_levels,
-        )
+        tp = self.df_throughput(resample_exclude_ranges=False, **kwargs)
 
         target_date_df = pd.Timestamp(target_date, tz=timezone.utc)
         start_date = pd.Timestamp.now(tz=timezone.utc)
@@ -615,11 +623,10 @@ class FlowMetrics:
         mc_when: bool = False,
         mc_when_runs: int = 1000,
         mc_when_percentile: int = 85,
-        mc_exclude_ranges: list[DateTimeRange] | None = None,
-        only_hierarchy_levels: set[int] = {0},
+        **kwargs: Unpack[FilterKwArgs],
     ) -> DataFrame:
         df = pd.read_sql(
-            sql=self._select_backlog_items(only_hierarchy_levels=only_hierarchy_levels),
+            sql=self._select_backlog_items(**kwargs),
             con=self._engine,
         )
 
@@ -629,6 +636,7 @@ class FlowMetrics:
             df.groupby(
                 [
                     "identifier",
+                    "item_type",
                     "status",
                     "summary",
                     "sprint_name",
@@ -657,8 +665,7 @@ class FlowMetrics:
                     self.df_monte_carlo_when(
                         mc_when_runs,
                         item_count=x + 1,
-                        exclude_ranges=mc_exclude_ranges,
-                        only_hierarchy_levels=only_hierarchy_levels,
+                        **kwargs,
                     ),
                     percentile=mc_when_percentile,
                 )
@@ -669,13 +676,11 @@ class FlowMetrics:
 
     def plot_cfd(
         self,
-        highlight_ranges: list[DateTimeRange] | None = None,
         include_not_started_statuses: bool = False,
-        only_hierarchy_levels: set[int] = {0},
+        **kwargs: Unpack[FilterKwArgs],
     ) -> None:
         df = self.df_workflow_cum_arrivals(
-            include_not_started_statuses=include_not_started_statuses,
-            only_hierarchy_levels=only_hierarchy_levels,
+            include_not_started_statuses=include_not_started_statuses, **kwargs
         )
 
         fig = plt.figure(figsize=(16, 9))
@@ -683,6 +688,7 @@ class FlowMetrics:
 
         df.plot(ax=ax, kind="area", stacked=False, alpha=1)
 
+        highlight_ranges = kwargs.get("exclude_ranges")
         if highlight_ranges:
             self._highlight_exclude_ranges(ax, highlight_ranges, None)
 
@@ -690,17 +696,13 @@ class FlowMetrics:
         self,
         percentiles: list[int] = [50, 70, 85, 95],
         annotate_item_ids: bool = True,
-        exclude_ranges: list[DateTimeRange] | None = None,
-        only_hierarchy_levels: set[int] = {0},
+        **kwargs: Unpack[FilterKwArgs],
+        # only_hierarchy_levels: set[int] = {0},
     ) -> None:
-        df = self.df_status_changelog_with_durations(
-            only_hierarchy_levels=only_hierarchy_levels
-        )
+        df = self.df_status_changelog_with_durations(**kwargs)
         ct_df = self.df_cycle_time(df)
 
-        df_ranges_excluded = self._df_exclude_ranges_from_durations(
-            df, excludes=exclude_ranges
-        )
+        df_ranges_excluded = self._df_exclude_ranges_from_durations(df, **kwargs)
         ct_df_ranges_excluded = self.df_cycle_time(df_ranges_excluded)
 
         # Calculate quantile values for cycle time, useful for forecasting single item cycle time
@@ -718,6 +720,7 @@ class FlowMetrics:
         )
 
         # Highlight excluded ranges
+        exclude_ranges = kwargs.get("exclude_ranges")
         if exclude_ranges:
             self._highlight_exclude_ranges(ax, exclude_ranges, "Ranges excluded")
 
@@ -742,15 +745,10 @@ class FlowMetrics:
     def plot_cycle_time_histogram(
         self,
         percentiles: list[int] = [50, 85, 95],
-        exclude_ranges: list[DateTimeRange] | None = None,
-        only_hierarchy_levels: set[int] = {0},
+        **kwargs: Unpack[FilterKwArgs],
     ) -> None:
-        df = self.df_status_changelog_with_durations(
-            only_hierarchy_levels=only_hierarchy_levels
-        )
-        df_ranges_excluded = self._df_exclude_ranges_from_durations(
-            df, excludes=exclude_ranges
-        )
+        df = self.df_status_changelog_with_durations(**kwargs)
+        df_ranges_excluded = self._df_exclude_ranges_from_durations(df, **kwargs)
         ct_df = self.df_cycle_time(df_ranges_excluded)
 
         # Calculate quantile values for cycle time, useful for forecasting single item cycle time
@@ -770,6 +768,7 @@ class FlowMetrics:
                 label=f"{int(p * 100)}%",
             )
 
+        exclude_ranges = kwargs.get("exclude_ranges")
         if exclude_ranges:
             self._annotate_exclude_ranges(ax, exclude_ranges)
 
@@ -778,15 +777,10 @@ class FlowMetrics:
     def plot_aging_wip(
         self,
         percentiles: list[int] = [50, 70, 85, 95],
-        exclude_ranges: list[DateTimeRange] | None = None,
-        only_hierarchy_levels: set[int] = {0},
+        **kwargs: Unpack[FilterKwArgs],
     ) -> None:
-        df = self.df_status_changelog_with_durations(
-            only_hierarchy_levels=only_hierarchy_levels
-        )
-        df_ranges_excluded = self._df_exclude_ranges_from_durations(
-            df, excludes=exclude_ranges
-        )
+        df = self.df_status_changelog_with_durations(**kwargs)
+        df_ranges_excluded = self._df_exclude_ranges_from_durations(df, **kwargs)
 
         # Item cycle time
         ct_df_ranges_excluded = self.df_cycle_time(df_ranges_excluded)
@@ -811,6 +805,8 @@ class FlowMetrics:
         fig = plt.figure(figsize=(16, 9))
         index = 0
         include_statuses = []
+
+        exclude_ranges = kwargs.get("exclude_ranges")
 
         for status in statuses:
             index += 1
@@ -884,10 +880,13 @@ class FlowMetrics:
 
     def plot_throughput_run_chart(
         self,
-        highlight_exclude_ranges: list[DateTimeRange] | None = None,
-        only_hierarchy_levels: set[int] = {0},
+        **kwargs: Unpack[FilterKwArgs],
     ) -> None:
-        df = self.df_throughput(only_hierarchy_levels=only_hierarchy_levels)
+        highlight_exclude_ranges = kwargs.get("exclude_ranges")
+        if highlight_exclude_ranges:
+            # We want to display all throughput values, even those that are excluded by the ranges
+            kwargs.pop("exclude_ranges")
+        df = self.df_throughput(**kwargs)
 
         fig = plt.figure(figsize=(16, 9))
         ax = fig.subplots()
@@ -905,15 +904,9 @@ class FlowMetrics:
         percentiles: list[int] = [50, 85, 95],
         runs: int = 10000,
         item_count: int = 10,
-        exclude_ranges: list[DateTimeRange] | None = None,
-        only_hierarchy_levels: set[int] = {0},
+        **kwargs: Unpack[FilterKwArgs],
     ) -> None:
-        s = self.df_monte_carlo_when(
-            runs=runs,
-            item_count=item_count,
-            exclude_ranges=exclude_ranges,
-            only_hierarchy_levels=only_hierarchy_levels,
-        )
+        s = self.df_monte_carlo_when(runs=runs, item_count=item_count, **kwargs)
 
         fig = plt.figure(figsize=(16, 9))
         ax = fig.subplots()
@@ -930,6 +923,7 @@ class FlowMetrics:
 
         ax.set_xticks(p_dates)
 
+        exclude_ranges = kwargs.get("exclude_ranges")
         if exclude_ranges:
             self._annotate_exclude_ranges(ax, exclude_ranges)
         ax.legend()
@@ -939,15 +933,9 @@ class FlowMetrics:
         target_date: datetime,
         runs: int = 10000,
         percentiles: list[int] = [50, 85, 95],
-        exclude_ranges: list[DateTimeRange] | None = None,
-        only_hierarchy_levels: set[int] = {0},
+        **kwargs: Unpack[FilterKwArgs],
     ) -> None:
-        s = self.df_monte_carlo_how_many(
-            target_date=target_date,
-            exclude_ranges=exclude_ranges,
-            runs=runs,
-            only_hierarchy_levels=only_hierarchy_levels,
-        )
+        s = self.df_monte_carlo_how_many(target_date=target_date, runs=runs, **kwargs)
         fig = plt.figure(figsize=(16, 9))
         ax = fig.subplots()
         ax.bar(s.index, s)
@@ -971,6 +959,7 @@ class FlowMetrics:
 
         ax.set_xticks(how_manys)
 
+        exclude_ranges = kwargs.get("exclude_ranges")
         if exclude_ranges:
             self._annotate_exclude_ranges(ax, exclude_ranges)
         ax.legend()
@@ -1040,7 +1029,13 @@ class FlowMetrics:
             label = None  # Only show label for the first range
 
     def _annotate_exclude_ranges(self, ax: Axes, ranges: list[DateTimeRange]) -> None:
-        text = ",".join([str(r) for r in ranges])
+        text = "; ".join(
+            [
+                f"{r.start_datetime.strftime('%Y-%m-%d') if r.start_datetime else 'None'} - {r.end_datetime.strftime('%Y-%m-%d') if r.end_datetime else 'None'}"
+                for r in ranges
+            ]
+        )
+
         ax.text(
             0.0,
             1.0,
@@ -1053,17 +1048,18 @@ class FlowMetrics:
     def _df_exclude_ranges_from_durations(
         self,
         status_changelog_with_durations: DataFrame,
-        excludes: list[DateTimeRange] | None = None,
+        **kwargs: Unpack[FilterKwArgs],
     ) -> DataFrame:
-        if excludes is None:
+        exclude_ranges = kwargs.get("exclude_ranges")
+        if exclude_ranges is None:
             return status_changelog_with_durations
 
-        self._validate_exclude_ranges(excludes)
+        self._validate_exclude_ranges(exclude_ranges)
 
-        df = (
-            status_changelog_with_durations.copy()
-        )  # Avoid modifying the original DataFrame
-        for range in excludes:
+        # Avoid modifying the original DataFrame, make a copy
+        df = status_changelog_with_durations.copy()
+
+        for range in exclude_ranges:
             if range.start_datetime is None or range.end_datetime is None:
                 raise ValueError(
                     "Both start_datetime and end_datetime must be provided in the DateTimeRange."

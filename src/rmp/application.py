@@ -32,6 +32,7 @@ class ItemDataSourceApplication(Application):
         rank: str,
         sprints: list[str],
         milestones: list[str],
+        item_type: str | None = None,
     ) -> UUID:
         item = Item.create(
             url,
@@ -43,6 +44,7 @@ class ItemDataSourceApplication(Application):
             rank,
             sprints,
             milestones,
+            item_type,
         )
         self.save(item)
         return item.id
@@ -118,6 +120,19 @@ class ItemDataSourceApplication(Application):
     ) -> None:
         item: Item = self.repository.get(Item.create_id(url))
         item.change_rank(timestamp, rank, changelog_tracking_id=changelog_tracking_id)
+        self.save(item)
+
+    def change_type(
+        self,
+        url: str,
+        timestamp: datetime,
+        item_type: str | None,
+        changelog_tracking_id: int | None = None,
+    ) -> None:
+        item: Item = self.repository.get(Item.create_id(url))
+        item.change_type(
+            timestamp, item_type, changelog_tracking_id=changelog_tracking_id
+        )
         self.save(item)
 
     def add_sprint(
@@ -283,6 +298,7 @@ class AnalyticsDbApplication(ProcessApplication):
                 rank=domain_event.rank,
                 summary=domain_event.summary,
                 created_time=domain_event.timestamp,
+                item_type=domain_event.item_type,
             )
             session.add(item)
 
@@ -373,6 +389,16 @@ class AnalyticsDbApplication(ProcessApplication):
                 start_time=domain_event.timestamp,
             )
             session.add(changelog)
+            session.commit()
+
+    @_policy.register
+    def _(self, domain_event: Item.TypeChanged, process_event: ProcessingEvent) -> None:
+        with self._get_transaction() as session:
+            session.execute(
+                update(SqlItem)
+                .where(SqlItem.id == domain_event.originator_id)
+                .values(item_type=domain_event.item_type)
+            )
             session.commit()
 
     @_policy.register

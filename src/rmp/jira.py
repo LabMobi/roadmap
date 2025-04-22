@@ -194,12 +194,16 @@ class JiraCloudRequests:
 class JiraCloudConnector(DataSourceConnector):
     PATH_SEARCH_ISSUES = "rest/api/3/search/jql"
     PATH_GET_ISSUE_CHANGELOG = "rest/api/3/issue/%s/changelog"
+    PATH_BOARD = "rest/agile/1.0/board/%s"
     PATH_BOARD_SPRINTS = "rest/agile/1.0/board/%s/sprint"
     PATH_BOARD_VERSIONS = "rest/agile/1.0/board/%s/version"
 
-    RANK_FIELD = "customfield_10019"
-    SPRINTS_FIELD = "customfield_10020"
-    FIX_VERSIONS_FIELD = "fixVersions"
+    FIELDID_RANK = "customfield_10019"
+    FIELDID_SPRINTS = "customfield_10020"
+    FIELDID_ISSUETYPE = "issuetype"
+    FIELDID_SUMMARY = "summary"
+    FIELDID_STATUS = "status"
+    FIELDID_FIX_VERSIONS = "fixVersions"
 
     def __init__(
         self,
@@ -252,6 +256,16 @@ class JiraCloudConnector(DataSourceConnector):
 
     @override
     def load_sprints(self, app: SprintDataSourceApplication) -> None:
+        board = next(
+            self._jira_requests.get(
+                self.PATH_BOARD % self._board_id, progress_desc="Getting Jira board"
+            )
+        )
+
+        if board["type"] != "scrum":
+            # Jira board is not a scrum board
+            return
+
         sprints = self._jira_requests.get(
             self.PATH_BOARD_SPRINTS % self._board_id,
             paged_data_key="values",
@@ -276,7 +290,8 @@ class JiraCloudConnector(DataSourceConnector):
             if operation == "append":
                 ls.append(value)
             elif operation == "remove":
-                ls.remove(value)
+                if value in ls:  # TODO: fix the problem with CDP-6, DO NOT COMMIT!
+                    ls.remove(value)
             else:
                 raise ValueError(f"Invalid operation: {operation}")
 
@@ -302,9 +317,9 @@ class JiraCloudConnector(DataSourceConnector):
                     "status",
                     "issuetype",
                     "created",
-                    self.RANK_FIELD,
-                    self.SPRINTS_FIELD,
-                    self.FIX_VERSIONS_FIELD,
+                    self.FIELDID_RANK,
+                    self.FIELDID_SPRINTS,
+                    self.FIELDID_FIX_VERSIONS,
                 ],
                 "jql": jql,
             },
@@ -333,19 +348,29 @@ class JiraCloudConnector(DataSourceConnector):
 
             # Changelog does contain event for rank change, but actual value is stored only in the issue, so we do not have
             # historical ranking changelog available.
-            rank = item["fields"][self.RANK_FIELD]
+            rank = item["fields"][self.FIELDID_RANK]
+
+            # For simplicity we do not currently support changelog based hierarchy level, but use the latest value
+            # stored in issue. The drawback of this is that issue hierarchy level changes get out of sync with our
+            # internal hierarchy level events when updates are fetched from Jira. As a workaround one needs to full
+            # re-fetch all issues to get the latest and correct hierarchy level.
+            #
+            # To support hierarchy level change events correctly changelog fields IssueParentAssociation and/or issuetype
+            # should be handled. The most straightforward implementation would be using issuetype field with configurable
+            # mapping of issue types to hierarchy levels.
+            hierarchy_level = item["fields"]["issuetype"]["hierarchyLevel"]
 
             if not existing_item:
                 initial_summary = None
                 initial_status = None
-                initial_hierarchy_level = None
+                initial_issue_type = None
 
                 # Initially this will be the last known set of sprints for item
                 # Reversed changelog changes will be undone on this value, resulting in
                 # the initial set of sprints
                 initial_sprints: list[str] = (
-                    [str(s["id"]) for s in item["fields"][self.SPRINTS_FIELD]]
-                    if item["fields"][self.SPRINTS_FIELD] is not None
+                    [str(s["id"]) for s in item["fields"][self.FIELDID_SPRINTS]]
+                    if item["fields"][self.FIELDID_SPRINTS] is not None
                     else []
                 )
                 changelog_sprint_ops: list[tuple[str, str]] = []
@@ -354,7 +379,7 @@ class JiraCloudConnector(DataSourceConnector):
                 # Reversed changelog changes will be undone on this value, resulting in
                 # the initial set of fix versions
                 initial_fix_versions: list[str] = [
-                    v["id"] for v in item["fields"][self.FIX_VERSIONS_FIELD]
+                    v["id"] for v in item["fields"][self.FIELDID_FIX_VERSIONS]
                 ]
                 changelog_fix_version_ops: list[tuple[str, str]] = []
 
@@ -365,28 +390,31 @@ class JiraCloudConnector(DataSourceConnector):
 
                         if (
                             initial_summary is None
-                            and changelog_item["field"] == "summary"
+                            and "fieldId" in changelog_item
+                            and changelog_item["fieldId"] == self.FIELDID_SUMMARY
                         ):
                             initial_summary = changelog_item["fromString"]
 
                         if (
                             initial_status is None
-                            and changelog_item["field"] == "status"
+                            and "fieldId" in changelog_item
+                            and changelog_item["fieldId"] == self.FIELDID_STATUS
                         ):
                             initial_status = changelog_item["fromString"]
 
                         if (
-                            initial_hierarchy_level is None
-                            and changelog_item["field"] == "hierarchyLevel"
+                            initial_issue_type is None
+                            and "fieldId" in changelog_item
+                            and changelog_item["fieldId"] == self.FIELDID_ISSUETYPE
                         ):
-                            initial_hierarchy_level = changelog_item["fromString"]
+                            initial_issue_type = changelog_item["fromString"]
 
                         from_value: str = changelog_item["from"]
                         to_value: str = changelog_item["to"]
 
                         if (
                             "fieldId" in changelog_item
-                            and changelog_item["fieldId"] == self.SPRINTS_FIELD
+                            and changelog_item["fieldId"] == self.FIELDID_SPRINTS
                         ):
                             from_sprints = (
                                 set(from_value.split(", ")) if from_value else set()
@@ -407,7 +435,7 @@ class JiraCloudConnector(DataSourceConnector):
 
                         if (
                             "fieldId" in changelog_item
-                            and changelog_item["fieldId"] == self.FIX_VERSIONS_FIELD
+                            and changelog_item["fieldId"] == self.FIELDID_FIX_VERSIONS
                         ):
                             # Create lambda functions that can be executed later in reverse order
                             # to reconstruct the initial state by undoing the changelog changes
@@ -419,7 +447,7 @@ class JiraCloudConnector(DataSourceConnector):
                                 changelog_fix_version_ops.append(("remove", to_value))
                             else:
                                 raise ValueError(
-                                    f"Unexpected changelog state for {self.FIX_VERSIONS_FIELD} field"
+                                    f"Unexpected changelog state for {self.FIELDID_FIX_VERSIONS} field"
                                 )
 
                 # If there was no changes in changelog, set initial values to current values
@@ -429,10 +457,8 @@ class JiraCloudConnector(DataSourceConnector):
                 if initial_status is None:
                     initial_status = item["fields"]["status"]["name"]
 
-                if initial_hierarchy_level is None:
-                    initial_hierarchy_level = item["fields"]["issuetype"][
-                        "hierarchyLevel"
-                    ]
+                if initial_issue_type is None:
+                    initial_issue_type = item["fields"]["issuetype"]["name"]
 
                 # Undo changes to reconstruct initial state for sprints
                 self._apply_operations(reversed(changelog_sprint_ops), initial_sprints)
@@ -451,15 +477,16 @@ class JiraCloudConnector(DataSourceConnector):
                 )
 
                 app.create_item(
-                    url,
-                    timestamp,
-                    item["key"],
-                    initial_summary,
-                    initial_status,
-                    initial_hierarchy_level,
-                    rank,
-                    initial_sprints,
-                    initial_fix_versions,
+                    url=url,
+                    timestamp=timestamp,
+                    identifier=item["key"],
+                    summary=initial_summary,
+                    status=initial_status,
+                    hierarchy_level=hierarchy_level,
+                    rank=rank,
+                    sprints=initial_sprints,
+                    milestones=initial_fix_versions,
+                    item_type=initial_issue_type,
                 )
 
             last_changelog_timestamp = None
@@ -473,22 +500,11 @@ class JiraCloudConnector(DataSourceConnector):
                 last_changelog_timestamp = timestamp
 
                 for changelog_item in changelog["items"]:
-                    if changelog_item["field"] == "summary":
+                    if (
+                        "fieldId" in changelog_item
+                        and changelog_item["fieldId"] == self.FIELDID_SUMMARY
+                    ):
                         app.change_summary(
-                            url,
-                            timestamp,
-                            changelog_item["toString"],
-                            changelog_tracking_id=changelog_tracking_id,
-                        )
-                    if changelog_item["field"] == "status":
-                        app.change_status(
-                            url,
-                            timestamp,
-                            changelog_item["toString"],
-                            changelog_tracking_id=changelog_tracking_id,
-                        )
-                    if changelog_item["field"] == "hierarchyLevel":
-                        app.change_hierarchy_level(
                             url,
                             timestamp,
                             changelog_item["toString"],
@@ -496,7 +512,27 @@ class JiraCloudConnector(DataSourceConnector):
                         )
                     if (
                         "fieldId" in changelog_item
-                        and changelog_item["fieldId"] == self.SPRINTS_FIELD
+                        and changelog_item["fieldId"] == self.FIELDID_STATUS
+                    ):
+                        app.change_status(
+                            url,
+                            timestamp,
+                            changelog_item["toString"],
+                            changelog_tracking_id=changelog_tracking_id,
+                        )
+                    if (
+                        "fieldId" in changelog_item
+                        and changelog_item["fieldId"] == self.FIELDID_ISSUETYPE
+                    ):
+                        app.change_type(
+                            url,
+                            timestamp,
+                            changelog_item["toString"],
+                            changelog_tracking_id=changelog_tracking_id,
+                        )
+                    if (
+                        "fieldId" in changelog_item
+                        and changelog_item["fieldId"] == self.FIELDID_SPRINTS
                     ):
                         from_value = changelog_item["from"]  # e.g. '114, 147'
                         to_value = changelog_item["to"]  # e.g. '114'
@@ -527,7 +563,7 @@ class JiraCloudConnector(DataSourceConnector):
 
                     if (
                         "fieldId" in changelog_item
-                        and changelog_item["fieldId"] == self.FIX_VERSIONS_FIELD
+                        and changelog_item["fieldId"] == self.FIELDID_FIX_VERSIONS
                     ):
                         from_value = changelog_item["from"]
                         to_value = changelog_item["to"]
@@ -548,12 +584,12 @@ class JiraCloudConnector(DataSourceConnector):
                             )
                         else:
                             raise ValueError(
-                                f"Unexpected changelog state for {self.FIX_VERSIONS_FIELD} field"
+                                f"Unexpected changelog state for {self.FIELDID_FIX_VERSIONS} field"
                             )
 
                     if (
                         "fieldId" in changelog_item
-                        and changelog_item["fieldId"] == self.RANK_FIELD
+                        and changelog_item["fieldId"] == self.FIELDID_RANK
                     ):
                         app.change_rank(
                             url,
