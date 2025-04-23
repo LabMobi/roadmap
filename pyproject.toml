@@ -1,8 +1,10 @@
 [tool.poetry]
 name = "rmp"
-version = "0.1.0"
+version = "0.0.1"
 description = "Analyze team performance for better predictability"
 authors = ["Ergo Sarapu"]
+readme = "README.md"
+license = "MIT"
 
 [tool.poetry.dependencies]
 python = "^3.11"
