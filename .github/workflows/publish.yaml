@@ -24,6 +24,9 @@ jobs:
           curl -sSL https://install.python-poetry.org | python3 -
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
+      - name: Set fixed tag for TestPyPI
+        run: echo "POETRY_DYNAMIC_VERSIONING_TAG=0.0.1" >> $GITHUB_ENV
+
       - name: Install dynamic versioning plugin
         run: |
           pip install poetry-dynamic-versioning
