@@ -48,3 +48,5 @@ disallow_untyped_decorators = false
 
 [tool.poetry-dynamic-versioning]
 enable = true
+strip = true
+pattern = "0.0.1.dev{commitcount}"
