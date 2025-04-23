@@ -45,3 +45,6 @@ packages = [
 files = ["src", "tests"]
 strict = true
 disallow_untyped_decorators = false
+
+[tool.poetry-dynamic-versioning]
+enable = true
