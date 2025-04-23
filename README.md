@@ -5,7 +5,7 @@ Roadmap is a Python package that helps to analyze and visualize team's agile sof
 
 ### Install from PyPI
 ```sh
-$ pip install [TODO: package name]
+$ pip install rmp
 ```
 
 ## Usage examples
