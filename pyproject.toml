@@ -1,7 +1,6 @@
 [project]
 name = "rmp"
 dynamic = ["version"]
-version = "0.0.0"
 
 [tool.poetry]
 description = "Analyze team performance for better predictability"
@@ -11,6 +10,7 @@ license = "MIT"
 packages = [
     { include = "rmp", from = "src" },
 ]
+version = "0.0.0"
 
 [tool.poetry.dependencies]
 python = "^3.11"
@@ -53,4 +53,4 @@ disallow_untyped_decorators = false
 
 [tool.poetry-dynamic-versioning]
 enable = true
-format-jinja = "{% if major == 0 and minor == 0 and patch == 0 %}{{ commit }}{% else %}{{ base }}{% endif %}"
+format-jinja = "{{base}}{% if major == 0 and minor == 0 and patch == 0 %}.{{ timestamp }}{% endif %}"
