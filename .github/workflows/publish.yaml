@@ -7,39 +7,7 @@ on:
       - "v*.*.*"
 
 jobs:
-  publish-testpypi:
-    if: "!startsWith(github.ref, 'refs/tags/')"
-    name: Publish to TestPyPI
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Poetry
-        run: |
-          curl -sSL https://install.python-poetry.org | python3 -
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-
-      - name: Configure Poetry for TestPyPI
-        run: |
-          poetry config repositories.test-pypi https://test.pypi.org/legacy/
-          poetry config pypi-token.test-pypi ${{ secrets.TEST_PYPI_API_TOKEN }}
-
-      - name: Install dependencies
-        run: poetry install --no-root
-
-      - name: Build
-        run: poetry build
-
-      - name: Publish to TestPyPI
-        run: poetry publish -r test-pypi -vvv
-
   publish-pypi:
-    if: startsWith(github.ref, 'refs/tags/')
     name: Publish to PyPI (on tag)
     runs-on: ubuntu-latest
     steps:
