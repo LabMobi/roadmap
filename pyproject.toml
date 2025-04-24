@@ -53,4 +53,4 @@ disallow_untyped_decorators = false
 
 [tool.poetry-dynamic-versioning]
 enable = true
-format-jinja = "{{base}}{% if major == 0 and minor == 0 and patch == 0 %}.post{{ timestamp }}{% endif %}"
+format-jinja = "{{distance}}{{base}}{% if major == 0 and minor == 0 and patch == 0 and distance > 0 %}.post{{ timestamp }}{% endif %}"
