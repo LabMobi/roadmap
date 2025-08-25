@@ -238,11 +238,7 @@ class JiraCloudConnector(DataSourceConnector):
         for version in versions:
             release_date = None
             if "releaseDate" in version:
-                release_date = (
-                    datetime.strptime(version["releaseDate"], "%Y-%m-%dT%H:%M:%S.%f%z")
-                    .astimezone(pytz.utc)
-                    .replace(tzinfo=None)
-                )
+                release_date = self._parse_datetime(version["releaseDate"])
             app.create_or_update_milestone(
                 url=version["self"],
                 identifier=version["id"],
@@ -273,8 +269,23 @@ class JiraCloudConnector(DataSourceConnector):
         )
 
         for index, sprint in enumerate(sprints):
+            create_date = self._parse_datetime(sprint["createdDate"])
+            complete_date = (
+                self._parse_datetime(sprint["completeDate"])
+                if "completeDate" in sprint
+                else None
+            )
+
             app.create_or_update_sprint(
-                sprint["self"], sprint["id"], sprint["state"], sprint["name"], index
+                url=sprint["self"],
+                timestamp=create_date,
+                identifier=sprint["id"],
+                state=sprint["state"],
+                name=sprint["name"],
+                order=index,
+                start_time=self._parse_datetime(sprint["startDate"]),
+                end_time=self._parse_datetime(sprint["endDate"]),
+                complete_time=complete_date,
             )
 
     def _append(self, ls: list[str], value: str) -> None:
@@ -468,13 +479,7 @@ class JiraCloudConnector(DataSourceConnector):
                     reversed(changelog_fix_version_ops), initial_fix_versions
                 )
 
-                timestamp = (
-                    datetime.strptime(
-                        item["fields"]["created"], "%Y-%m-%dT%H:%M:%S.%f%z"
-                    )
-                    .astimezone(pytz.utc)
-                    .replace(tzinfo=None)
-                )
+                timestamp = self._parse_datetime(item["fields"]["created"])
 
                 app.create_item(
                     url=url,
@@ -491,11 +496,7 @@ class JiraCloudConnector(DataSourceConnector):
 
             last_changelog_timestamp = None
             for changelog in changelogs:
-                timestamp = (
-                    datetime.strptime(changelog["created"], "%Y-%m-%dT%H:%M:%S.%f%z")
-                    .astimezone(pytz.utc)
-                    .replace(tzinfo=None)
-                )
+                timestamp = self._parse_datetime(changelog["created"])
                 changelog_tracking_id += 1
                 last_changelog_timestamp = timestamp
 
@@ -607,4 +608,11 @@ class JiraCloudConnector(DataSourceConnector):
 
         self.option_storage.set_option(
             "last_updated_milliseconds", str(last_updated_milliseconds)
+        )
+
+    def _parse_datetime(self, value: str) -> datetime:
+        return (
+            datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%f%z")
+            .astimezone(pytz.utc)
+            .replace(tzinfo=None)
         )

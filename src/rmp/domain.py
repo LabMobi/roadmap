@@ -308,6 +308,9 @@ class Sprint(Aggregate):
         state: str
         name: str
         order: int
+        start_time: datetime
+        end_time: datetime
+        complete_time: datetime | None = None
 
     class OrderChanged(Aggregate.Event):
         order: int
@@ -318,30 +321,66 @@ class Sprint(Aggregate):
     class NameChanged(Aggregate.Event):
         name: str
 
+    class StartTimeChanged(Aggregate.Event):
+        start_time: datetime
+
+    class EndTimeChanged(Aggregate.Event):
+        end_time: datetime
+
+    class CompleteTimeChanged(Aggregate.Event):
+        complete_time: datetime | None
+
     @classmethod
     def create(
-        cls, url: str, identifier: str, state: str, name: str, order: int
+        cls,
+        url: str,
+        timestamp: datetime,
+        identifier: str,
+        state: str,
+        name: str,
+        order: int,
+        start_time: datetime,
+        end_time: datetime,
+        complete_time: datetime | None,
     ) -> Sprint:
         return cls._create(
             cls.Created,
             url=url,
+            timestamp=timestamp,
             identifier=identifier,
             state=state,
             name=name,
             order=order,
+            start_time=start_time,
+            end_time=end_time,
+            complete_time=complete_time,
         )
 
     @classmethod
     def create_id(cls, url: str) -> UUID:
         return uuid5(NAMESPACE_URL, url)
 
-    def update(self, state: str, name: str, order: int) -> None:
+    def update(
+        self,
+        state: str,
+        name: str,
+        order: int,
+        start_time: datetime,
+        end_time: datetime,
+        complete_time: datetime | None,
+    ) -> None:
         if self.state != state:
             self.trigger_event(self.StateChanged, state=state)
         if self.order != order:
             self.trigger_event(self.OrderChanged, order=order)
         if self.name != name:
             self.trigger_event(self.NameChanged, name=name)
+        if self.start_time != start_time:
+            self.trigger_event(self.StartTimeChanged, start_time=start_time)
+        if self.end_time != end_time:
+            self.trigger_event(self.EndTimeChanged, end_time=end_time)
+        if self.complete_time != complete_time:
+            self.trigger_event(self.CompleteTimeChanged, complete_time=complete_time)
 
     @singledispatchmethod
     def apply(self, event: Event) -> None:
@@ -354,6 +393,9 @@ class Sprint(Aggregate):
         self.state: str = event.state
         self.name: str = event.name
         self.order: int = event.order
+        self.start_time: datetime = event.start_time
+        self.end_time: datetime = event.end_time
+        self.complete_time: datetime | None = event.complete_time
 
     @apply.register
     def _(self, event: Sprint.StateChanged) -> None:
@@ -366,6 +408,18 @@ class Sprint(Aggregate):
     @apply.register
     def _(self, event: Sprint.NameChanged) -> None:
         self.name = event.name
+
+    @apply.register
+    def _(self, event: Sprint.StartTimeChanged) -> None:
+        self.start_time = event.start_time
+
+    @apply.register
+    def _(self, event: Sprint.EndTimeChanged) -> None:
+        self.end_time = event.end_time
+
+    @apply.register
+    def _(self, event: Sprint.CompleteTimeChanged) -> None:
+        self.complete_time = event.complete_time
 
 
 class Milestone(Aggregate):

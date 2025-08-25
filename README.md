@@ -40,7 +40,7 @@ backend.load_data()
 ```python
 from sqlalchemy import create_engine
 from rmp.flow_metrics import FlowMetrics, Workflow, FilterKwArgs
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Create engine for data access
 engine = create_engine(f"sqlite:///my_db.sqlite", echo=False)
@@ -59,7 +59,8 @@ filter = FilterKwArgs(
     exclude_ranges=[
         DateTimeRange("2024-12-23", "2025-01-05"), # Christmas period, team offline
         DateTimeRange("2025-04-14", "2025-04-21"), # Holy Week, most of the team away
-    ]
+    ],
+    as_of=datetime.now(tz=timezone.utc), # Specify to query state at particular time moment
 )
 
 # Create instance of FlowMetrics
@@ -87,8 +88,10 @@ fm.plot_monte_carlo_when_hist(runs=10000, item_count=90, **filter)
 target_date = datetime.now() + pd.Timedelta(days=30)
 fm.plot_monte_carlo_how_many_hist(runs=10000, target_date=target_date, **filter)
 
-# Output prioritised backlog with 85% confidence forecast of delivery dates  
-fm.df_backlog_items(mc_when=True, mc_when_runs=1000, mc_when_percentile=85, **filter)
+# Output finished items and prioritized backlog with 85% confidence forecasted delivery dates  
+df = fm.df_timeline_items(mc_when=True, mc_when_runs=1000, mc_when_percentile=85, **filter)
+fm.styled_timeline_items(df) # Returns Styled represenation of timeline
+
 ```
 
 ## Development

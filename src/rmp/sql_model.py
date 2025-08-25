@@ -4,7 +4,6 @@ from sqlalchemy.orm import DeclarativeBase, relationship
 from sqlalchemy.orm import Mapped
 from sqlalchemy.orm import mapped_column
 from sqlalchemy import String, ForeignKey, UniqueConstraint
-from sqlalchemy import Table, Column
 
 
 class Base(DeclarativeBase):
@@ -81,12 +80,8 @@ class Item(Base):
     status_changelogs: Mapped[list["ItemStatusChangelog"]] = relationship(
         "ItemStatusChangelog", back_populates="item"
     )
-    sprints: Mapped[list["Sprint"]] = relationship(
-        "Sprint", secondary="sprint_item_association", back_populates="items"
-    )
-    milestones: Mapped[list["Milestone"]] = relationship(
-        "Milestone", secondary="milestone_item_association", back_populates="items"
-    )
+    sprints: Mapped[list["SprintItem"]] = relationship(back_populates="item")
+    milestones: Mapped[list["MilestoneItem"]] = relationship(back_populates="item")
 
     def __repr__(self) -> str:
         return f"Item(id={self.id!r}, identifier={self.identifier!r}, status={self.status!r}, summary={self.summary!r})"
@@ -108,6 +103,20 @@ class ItemStatusChangelog(Base):
     )
 
 
+class ItemRankChangelog(Base):
+    __tablename__ = "item_rank_changelog"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    item_id: Mapped[UUID] = mapped_column(ForeignKey("item.id"))
+    rank: Mapped[str] = mapped_column()
+    start_time: Mapped[datetime.datetime] = mapped_column()
+    end_time: Mapped[datetime.datetime] = mapped_column(nullable=True)
+    item: Mapped["Item"] = relationship("Item")
+
+    __table_args__ = (
+        UniqueConstraint("item_id", "rank", "start_time", name="unique_rank_changelog"),
+    )
+
+
 class Sprint(Base):
     __tablename__ = "sprint"
     id: Mapped[UUID] = mapped_column(primary_key=True)
@@ -116,24 +125,31 @@ class Sprint(Base):
     state: Mapped[str] = mapped_column(String(16))
     name: Mapped[str] = mapped_column(String(256))
     order: Mapped[int] = mapped_column()
+    create_time: Mapped[datetime.datetime] = mapped_column()
+    start_time: Mapped[datetime.datetime] = mapped_column()
+    end_time: Mapped[datetime.datetime] = mapped_column()
+    complete_time: Mapped[datetime.datetime] = mapped_column(nullable=True)
 
     # Define the relationship to Item
-    items: Mapped[list["Item"]] = relationship(
-        "Item", secondary="sprint_item_association", back_populates="sprints"
-    )
+    items: Mapped[list["SprintItem"]] = relationship(back_populates="sprint")
 
     def __repr__(self) -> str:
         return f"Sprint(id={self.id!r}, identifier={self.identifier!r}, state={self.state!r})"
 
 
-# Association table for many-to-many relationship between Sprint and Item
+class SprintItem(Base):
+    __tablename__ = "sprint_item_association"
+    sprint_id: Mapped[UUID] = mapped_column(ForeignKey("sprint.id"), primary_key=True)
+    item_id: Mapped[UUID] = mapped_column(ForeignKey("item.id"), primary_key=True)
+    add_time: Mapped[datetime.datetime] = mapped_column(primary_key=True)
+    remove_time: Mapped[datetime.datetime] = mapped_column(nullable=True)
 
-sprint_item_association = Table(
-    "sprint_item_association",
-    Base.metadata,
-    Column("sprint_id", ForeignKey("sprint.id"), primary_key=True),
-    Column("item_id", ForeignKey("item.id"), primary_key=True),
-)
+    # Relationships
+    item: Mapped["Item"] = relationship(back_populates="sprints")
+    sprint: Mapped["Sprint"] = relationship(back_populates="items")
+
+    def __repr__(self) -> str:
+        return f"SprintItem(sprint_id={self.sprint_id!r}, item_id={self.item_id!r})"
 
 
 class Milestone(Base):
@@ -147,17 +163,24 @@ class Milestone(Base):
     released: Mapped[bool] = mapped_column()
 
     # Define the relationship to Item
-    items: Mapped[list["Item"]] = relationship(
-        "Item", secondary="milestone_item_association", back_populates="milestones"
-    )
+    items: Mapped[list["MilestoneItem"]] = relationship(back_populates="milestone")
 
     def __repr__(self) -> str:
         return f"Milestone(id={self.id!r}, identifier={self.identifier!r}, name={self.name!r})"
 
 
-milestone_item_association = Table(
-    "milestone_item_association",
-    Base.metadata,
-    Column("milestone_id", ForeignKey("milestone.id"), primary_key=True),
-    Column("item_id", ForeignKey("item.id"), primary_key=True),
-)
+class MilestoneItem(Base):
+    __tablename__ = "milestone_item_association"
+    milestone_id: Mapped[UUID] = mapped_column(
+        ForeignKey("milestone.id"), primary_key=True
+    )
+    item_id: Mapped[UUID] = mapped_column(ForeignKey("item.id"), primary_key=True)
+    add_time: Mapped[datetime.datetime] = mapped_column(primary_key=True)
+    remove_time: Mapped[datetime.datetime] = mapped_column(nullable=True)
+
+    # Relationships
+    item: Mapped["Item"] = relationship(back_populates="milestones")
+    milestone: Mapped["Milestone"] = relationship(back_populates="items")
+
+    def __repr__(self) -> str:
+        return f"MilestoneItem(milestone_id={self.milestone_id!r}, item_id={self.item_id!r})"

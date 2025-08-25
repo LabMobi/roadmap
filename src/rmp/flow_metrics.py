@@ -6,20 +6,22 @@ from matplotlib.axes import Axes
 import numpy as np
 import pandas as pd
 from pandas import DataFrame, Series, Timestamp
-from sqlalchemy import Engine, Select, and_, case, literal
+from sqlalchemy import Engine, Select, and_, or_, case, literal
 from sqlalchemy.orm import Session
 from rmp.sql_model import (
     Item,
+    ItemRankChangelog,
     ItemStatusChangelog,
     Milestone,
     Sprint,
-    sprint_item_association,
-    milestone_item_association,
+    SprintItem,
+    MilestoneItem,
 )
 from sqlalchemy import func, union_all, select
 from datetime import datetime, timezone
 from datetimerange import DateTimeRange
 import matplotlib.ticker as tck
+from pandas.io.formats.style import Styler
 
 pd.options.mode.copy_on_write = True
 
@@ -28,6 +30,7 @@ class FilterKwArgs(TypedDict, total=False):
     include_hierarchy_levels: set[int] | None
     exclude_item_types: set[str] | None
     exclude_ranges: list[DateTimeRange] | None
+    as_of: datetime | None
 
 
 class Workflow:
@@ -288,81 +291,153 @@ class FlowMetrics:
 
         return filtered
 
-    def _select_backlog_items(
+    def _select_items_timeline(
         self, **kwargs: Unpack[FilterKwArgs]
     ) -> Select[tuple[Any, ...]]:
         include_hierarchy_levels = kwargs.get("include_hierarchy_levels")
         exclude_item_types = kwargs.get("exclude_item_types")
+        as_of = kwargs.get("as_of")
 
-        backlog_items = (
-            select(Item)
-            .order_by(Item.rank)
+        if not as_of:
+            as_of = datetime.now(timezone.utc)
+
+        finished_time = case(
+            (
+                ItemStatusChangelog.status.in_(self._workflow._finished),
+                ItemStatusChangelog.start_time,
+            )
+        ).label("finished_time")
+
+        items = (
+            select(
+                Item.id,
+                Item.identifier,
+                ItemStatusChangelog.status,
+                ItemRankChangelog.rank,
+                finished_time,
+                Item.item_type,  # TODO: query from history
+                Item.hierarchy_level,  # TODO: query from history
+                Item.summary,  # TODO: query from history
+            )
+            .join(ItemStatusChangelog)
+            .join(ItemRankChangelog)
+            .order_by(ItemRankChangelog.rank)
             .where(
+                # Include only item status effective at as_of
+                ItemStatusChangelog.start_time <= as_of,
+                or_(
+                    ItemStatusChangelog.end_time > as_of,
+                    ItemStatusChangelog.end_time.is_(None),
+                ),
+                # Include only item rank effective at as_of
+                ItemRankChangelog.start_time <= as_of,
+                or_(
+                    ItemRankChangelog.end_time > as_of,
+                    ItemRankChangelog.end_time.is_(None),
+                ),
+                # Include only items created at or later than as_of
+                Item.created_time <= as_of,
                 Item.hierarchy_level.in_(
                     include_hierarchy_levels if include_hierarchy_levels else {0}
-                ),
-                Item.status.in_(
-                    self._workflow._not_started + self._workflow._in_progress
-                ),
-                Item.item_type.notin_(exclude_item_types if exclude_item_types else {}),
+                ),  # TODO: query from history
+                Item.item_type.notin_(
+                    exclude_item_types if exclude_item_types else {}
+                ),  # TODO: query from history
             )
-        ).cte("_backlog_items")
+        ).cte("_items")
 
-        sprint_joined = (
+        # Item can be in multiple sprints, we are interested only in the latest sprint the item appears
+        # Use window function to partition by the item_id and order the item's belonging to sprints
+        # by sprint order so we can filter out duplicates later
+        sprints_items_all = (
             select(
-                backlog_items,
-                Sprint.name.label("sprint_name"),
-                Sprint.state.label("sprint_state"),
-                Sprint.order.label("sprint_order"),
-            )
-            .select_from(backlog_items)
-            # This condition can produce multiple rows for the same item
-            # if the item has been in multiple sprints
-            .outerjoin(sprint_item_association)
-            .outerjoin(
                 Sprint,
+                SprintItem,
+                func.row_number()
+                .over(
+                    partition_by=SprintItem.item_id,
+                    order_by=Sprint.order.desc().nulls_last(),
+                )
+                .label("row_num"),
+            )
+            .join(
+                SprintItem,
                 and_(
-                    sprint_item_association.c.sprint_id == Sprint.id,
-                    Sprint.state != "closed",
+                    Sprint.id == SprintItem.sprint_id,
+                    SprintItem.add_time <= as_of,
+                    or_(
+                        SprintItem.remove_time > as_of, SprintItem.remove_time.is_(None)
+                    ),
                 ),
             )
-            .order_by(Sprint.order.nulls_last(), backlog_items.c.rank)
-        ).cte("_sprint_joined")
+            .order_by(Sprint.order.desc().nulls_last())
+        ).cte("_sprint_items_all")
 
-        # Select only distinct items, since previously there could be multiple ross for same item
-        distinct_items = (
-            select(
-                func.max(sprint_joined.c.id).label("id"),
-                func.max(sprint_joined.c.identifier).label("identifier"),
-                func.max(sprint_joined.c.item_type).label("item_type"),
-                func.max(sprint_joined.c.url).label("url"),
-                func.max(sprint_joined.c.status).label("status"),
-                func.max(sprint_joined.c.hierarchy_level).label("hierarchy_level"),
-                func.max(sprint_joined.c.rank).label("rank"),
-                func.max(sprint_joined.c.summary).label("summary"),
-                func.max(sprint_joined.c.created_time).label("created_time"),
-                func.max(sprint_joined.c.sprint_name).label("sprint_name"),
-                func.max(sprint_joined.c.sprint_order).label("sprint_order"),
-                func.max(sprint_joined.c.sprint_state).label("sprint_state"),
+        sprint_items = (
+            select(sprints_items_all)
+            .where(
+                sprints_items_all.c.row_num == 1,
+                or_(
+                    sprints_items_all.c.complete_time >= as_of,
+                    sprints_items_all.c.complete_time.is_(None),
+                ),
             )
-            .group_by(sprint_joined.c.id)
-            .cte("_distinct_items")
+            .cte("_sprint_items")
         )
 
-        milestone_joined = (
+        items_with_sprints = (
             select(
-                distinct_items,
-                Milestone.name.label("milestone_name"),
+                items,
+                sprint_items.c.name.label("sprint_name"),
+                sprint_items.c.state.label("sprint_state"),
+                sprint_items.c.order.label("sprint_order"),
             )
-            .select_from(distinct_items)
+            .select_from(items)
+            .outerjoin(sprint_items, sprint_items.c.item_id == items.c.id)
+            .order_by(sprint_items.c.order.desc().nulls_last(), items.c.rank)
+        ).cte("_items_with_sprints")
+
+        milestone_items = (
+            select(Milestone, MilestoneItem)
+            .join(MilestoneItem, Milestone.id == MilestoneItem.milestone_id)
+            .where(
+                MilestoneItem.add_time <= as_of,
+                or_(
+                    MilestoneItem.remove_time > as_of,
+                    MilestoneItem.remove_time.is_(None),
+                ),
+            )
+        ).cte("_milestone_items")
+
+        items_with_milestones = (
+            select(
+                items_with_sprints,
+                milestone_items.c.id.label("milestone_id"),
+                milestone_items.c.name.label("milestone_name"),
+                milestone_items.c.release_date.label("milestone_release_date"),
+            )
+            .select_from(items_with_sprints)
             .outerjoin(
-                milestone_item_association,
-                milestone_item_association.c.item_id == distinct_items.c.id,
+                milestone_items,
+                and_(
+                    milestone_items.c.item_id == items_with_sprints.c.id,
+                    milestone_items.c.remove_time.is_(None),
+                ),
             )
-            .outerjoin(Milestone)
+        ).cte("_items_with_milestones")
+
+        # The ordering below creates timeline of past (completed) and future items
+        ordered = (
+            select(items_with_milestones)
+            # .where(return_cond)
+            .order_by(
+                items_with_milestones.c.finished_time.nulls_last(),
+                items_with_milestones.c.sprint_order.desc().nulls_last(),
+                items_with_milestones.c.rank,
+            )
         )
 
-        return milestone_joined
+        return ordered
 
     def df_cycle_time(self, status_changelog_with_durations: DataFrame) -> DataFrame:
         df = status_changelog_with_durations
@@ -547,7 +622,9 @@ class FlowMetrics:
     ) -> Series[int]:
         tp = self.df_throughput(resample_exclude_ranges=False, **kwargs)
 
-        start_date = pd.Timestamp.now(tz=timezone.utc)
+        as_of = kwargs.get("as_of")
+        if not as_of:
+            as_of = datetime.now(timezone.utc)
 
         # Convert throughput series to numpy array for faster sampling
         tp_values = np.asarray(tp.values)
@@ -578,7 +655,7 @@ class FlowMetrics:
 
         # Convert indices to dates
         completion_dates = [
-            start_date + pd.DateOffset(days=int(idx + 1)) for idx in completion_indices
+            as_of + pd.DateOffset(days=int(idx + 1)) for idx in completion_indices
         ]
 
         # Convert to Series and count frequencies
@@ -618,49 +695,118 @@ class FlowMetrics:
 
         return result
 
-    def df_backlog_items(
+    def df_timeline_items(
         self,
         mc_when: bool = False,
         mc_when_runs: int = 1000,
         mc_when_percentile: int = 85,
+        max_finished_items: int = 10,
+        sort_in_progress_first: bool = True,
         **kwargs: Unpack[FilterKwArgs],
     ) -> DataFrame:
         df = pd.read_sql(
-            sql=self._select_backlog_items(**kwargs),
+            sql=self._select_items_timeline(**kwargs),
             con=self._engine,
         )
 
-        # Doing the grouping with Pandas (not with SQL) as it allows to convert
-        # multiple milestone names into list data type directly
+        # Get unique milestone IDs, names and release dates
+        m_df = (
+            df[["milestone_id", "milestone_name", "milestone_release_date"]]
+            .dropna(how="all")
+            .drop_duplicates()
+            .sort_values(
+                by=[
+                    "milestone_release_date",
+                    "milestone_name",
+                    "milestone_id",
+                ]
+            )
+            .reset_index(drop=True)
+        )
+
+        # Create multiindex for columns
+        df.columns = pd.MultiIndex.from_tuples([(c, "") for c in df.columns])
+
+        # Add a column per milestone: ('milestones', milestone_name) with release_date if item has that milestone_id
+        for _, m in m_df.iterrows():
+            mid = m["milestone_id"]
+            mname = m["milestone_name"]
+            mdate = m["milestone_release_date"]
+
+            mcol = ("milestones", mname)
+            mask = df["milestone_id"] == mid
+            if mdate is pd.NaT:
+                df[mcol] = False
+                df.loc[mask, mcol] = True
+            else:
+                df[mcol] = pd.NaT
+                df.loc[mask, mcol] = mdate
+                # Ensure the milestone date is in UTC
+                df[mcol] = pd.to_datetime(df[mcol], utc=True)
+
+        # Aggregate all level 1 columns under 'milestone' using max,
+        # this gets us the wide format of milestone columns
+        milestone_cols = [col for col in df.columns if col[0] == "milestones"]
+        agg_dict = {col: "max" for col in milestone_cols}
+
         df = (
             df.groupby(
                 [
-                    "identifier",
-                    "item_type",
-                    "status",
-                    "summary",
-                    "sprint_name",
-                    "sprint_order",
-                    "rank",
+                    ("identifier", ""),
+                    ("item_type", ""),
+                    ("status", ""),
+                    ("summary", ""),
+                    ("sprint_order", ""),
+                    ("finished_time", ""),
+                    ("rank", ""),
                 ],
                 dropna=False,
             )
-            .agg(
-                {
-                    "milestone_name": lambda x: list(filter(None, x)) or None,
-                }
-            )
+            .agg(agg_dict)
             .reset_index()
         )
-        df = df.sort_values(
-            by=["sprint_order", "rank"], na_position="last", ignore_index=True
+
+        # Ensure finished_time is UTC
+        df[("finished_time", "")] = pd.to_datetime(df[("finished_time", "")], utc=True)
+
+        # Prepare column for Monte Carlo "when" simulation results
+        df[("mc_when", "")] = pd.NaT
+
+        statuses = (
+            self._workflow._not_started
+            + self._workflow._in_progress
+            + self._workflow._finished
         )
-        df = df.rename(columns={"milestone_name": "milestones"})
-        df = df.drop(columns=["sprint_order", "rank"])
+        df[("status_order", "")] = df[("status", "")].apply(
+            lambda s: statuses.index(s) if s in statuses else -1
+        )
+
+        df_finished = df[df[("finished_time", "")].notna()]
+        df_finished = df_finished.sort_values(
+            by=["finished_time"], na_position="last", ignore_index=True
+        )
+
+        # Limit the number of finished items to max_finished_items
+        if max_finished_items is not None and max_finished_items >= 0:
+            df_finished = df_finished.tail(max_finished_items)
+
+        df_unfinished = df[df[("finished_time", "")].isna()]
+        sort_cols = (
+            ["status_order", "sprint_order", "rank"]
+            if sort_in_progress_first
+            else ["sprint_order", "rank"]
+        )
+        sort_asc = [False, True, True] if sort_in_progress_first else [True, True]
+        df_unfinished = df_unfinished.sort_values(
+            by=sort_cols,
+            ascending=sort_asc,
+            na_position="last",
+            ignore_index=True,
+        )
 
         # Run Monte Carlo "when" simulation for each backlog item row
         if mc_when:
-            df["mc_when"] = df.index.map(
+            df_unfinished[("mc_when", "")] = df_unfinished.index.map(
                 lambda x: self._get_mc_when_date(
                     self.df_monte_carlo_when(
                         mc_when_runs,
@@ -670,9 +816,173 @@ class FlowMetrics:
                     percentile=mc_when_percentile,
                 )
             )
-            df["mc_when"] = df["mc_when"].dt.normalize()  # Keep only day precision
+            df_unfinished[("mc_when", "")] = df_unfinished[
+                ("mc_when", "")
+            ].dt.normalize()  # Keep only day precision
+
+        # Combine finished and unfinished items so they are in timeline order
+        df = pd.concat([df_finished, df_unfinished], ignore_index=True)
+
+        # Ensure mc_when is UTC
+        df[("mc_when", "")] = pd.to_datetime(df[("mc_when", "")], utc=True)
 
         return df
+
+    def styled_timeline_items(self, df: DataFrame) -> Styler:
+        # Create styled DataFrame
+        df[("timeline", "date")] = df[("finished_time", "")].combine_first(
+            df[("mc_when", "")]
+        )
+
+        df["timeline", "y"] = df["timeline", "date"].dt.year
+        df["timeline", "m"] = df["timeline", "date"].dt.month
+        df["timeline", "w"] = df["timeline", "date"].dt.isocalendar().week
+
+        # Remove milestones columns that are all NaN or False (no need to display)
+        for rem_col in [c for c in df.columns if c[0] == "milestones"]:
+            if df[rem_col].isna().all() or df[rem_col].eq(False).all():
+                df = df.drop(columns=[rem_col])
+
+        # Calculate diff in days against milestone release date
+        for col in df.columns:
+            if col[0] == "milestones" and pd.api.types.is_datetime64_any_dtype(df[col]):
+                mask_date_nat = (
+                    df[("timeline", "date")].isna() & df[("milestones", col[1])].notna()
+                )
+
+                df[("milestones", col[1])] = (
+                    pd.to_datetime(df[("timeline", "date")], utc=True)
+                    - pd.to_datetime(df[col], utc=True)
+                ).dt.days.astype("object")
+
+                df.loc[mask_date_nat, ("milestones", col[1])] = True
+
+        df["timeline", "date"] = df["timeline", "date"].dt.date
+        df = df.loc[
+            :,
+            [
+                ("timeline", "y"),
+                ("timeline", "m"),
+                ("timeline", "w"),
+                ("timeline", "date"),
+                ("identifier", ""),
+                ("item_type", ""),
+                ("status", ""),
+                ("summary", ""),
+            ]
+            + [c for c in df.columns if c[0] == "milestones"],
+        ]
+
+        return df.style.pipe(FlowMetrics._style_timeline, workflow=self._workflow)
+
+    @staticmethod
+    def _style_timeline(style: Styler, workflow: Workflow) -> Styler:
+        # Color statuses
+        style.apply(
+            lambda row: [
+                "background-color: lightgreen"
+                if col[0] == "status" and row[("status", "")] in workflow._finished
+                else ""
+                for col in row.index
+            ],
+            axis=1,
+        )
+        style.apply(
+            lambda row: [
+                "background-color: orange"
+                if col[0] == "status" and row[("status", "")] in workflow._in_progress
+                else ""
+                for col in row.index
+            ],
+            axis=1,
+        )
+        style.apply(
+            lambda row: [
+                "background-color: pink"
+                if col[0] == "status" and row[("status", "")] in workflow._not_started
+                else ""
+                for col in row.index
+            ],
+            axis=1,
+        )
+
+        milestone_cols = [col for col in style.columns if col[0] == "milestones"]
+        styled_milestone_cols = [
+            {
+                "selector": f"th.col_heading.level1.col{style.columns.get_loc(col)}",
+                "props": [
+                    ("writing-mode", "vertical-rl"),
+                    ("transform", "rotate(180deg)"),
+                    ("white-space", "nowrap"),
+                    ("text-align", "left"),
+                ],
+            }
+            for col in milestone_cols
+        ]
+        style.set_table_styles(styled_milestone_cols, axis=1, overwrite=False)  # type: ignore[arg-type]
+
+        timeline_cols = [col for col in style.columns if col[0] == "timeline"]
+        styled_timeline_cols = [
+            {
+                "selector": f"th.col_heading.level1.col{style.columns.get_loc(col)}",
+                "props": [
+                    ("vertical-align", "bottom"),
+                ],
+            }
+            for col in timeline_cols
+        ]
+        style.set_table_styles(styled_timeline_cols, axis=1, overwrite=False)  # type: ignore[arg-type]
+
+        # Style level 0 column headers with bigger font and center alignment
+        style.set_table_styles(
+            [
+                {
+                    "selector": "th.col_heading.level0",
+                    "props": [
+                        ("font-size", "1.2em"),
+                        ("font-weight", "bold"),
+                        ("text-align", "center"),
+                    ],
+                }
+            ],
+            axis=1,
+            overwrite=False,
+        )
+
+        # Format and highlight milestone data values
+        style.format(
+            FlowMetrics._format_milestone_date, subset=milestone_cols, na_rep=""
+        )
+        style.map(FlowMetrics._highlight_milestone_diff, subset=milestone_cols)
+
+        # Prevent wrapping of text in all cells
+        style.set_properties(subset=None, **{"white-space": "nowrap"})
+
+        return style
+
+    @staticmethod
+    def _format_milestone_date(val: object) -> str:
+        if isinstance(val, (np.integer, int, float, np.floating)) and not isinstance(
+            val, bool
+        ):
+            sign = ""
+            if val >= 0:
+                sign = "+"
+            return f"{sign}{int(val)}"
+        return ""
+
+    @staticmethod
+    def _highlight_milestone_diff(val: Any) -> str | None:
+        if isinstance(val, bool):
+            if val:
+                return "background-color: lightblue; color: black;"
+            else:
+                return None
+        if val <= 0:
+            return "background-color: green; color: white;"
+        elif val > 0:
+            return "background-color: red; color: white;"
+        return None
 
     def plot_cfd(
         self,

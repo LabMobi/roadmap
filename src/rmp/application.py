@@ -10,10 +10,13 @@ from sqlalchemy import select, update
 from rmp.domain import Item, Sprint, Milestone
 from datetime import datetime
 from rmp.sql_model import (
+    ItemRankChangelog,
     ItemStatusChangelog,
     Item as SqlItem,
     Sprint as SqlSprint,
+    SprintItem as SqlSprintItem,
     Milestone as SqlMilestone,
+    MilestoneItem as SqlMilestoneItem,
 )
 from eventsourcing.application import AggregateNotFoundError, ProcessingEvent
 from eventsourcing_sqlalchemy.datastore import Transaction
@@ -202,23 +205,66 @@ class ItemDataSourceApplication(Application):
 
 class SprintDataSourceApplication(Application):
     def create_sprint(
-        self, url: str, identifier: str, state: str, name: str, order: int
+        self,
+        url: str,
+        timestamp: datetime,
+        identifier: str,
+        state: str,
+        name: str,
+        order: int,
+        start_time: datetime,
+        end_time: datetime,
+        complete_time: datetime | None = None,
     ) -> UUID:
-        sprint = Sprint.create(url, identifier, state, name, order)
+        sprint = Sprint.create(
+            url,
+            timestamp,
+            identifier,
+            state,
+            name,
+            order,
+            start_time,
+            end_time,
+            complete_time,
+        )
         self.save(sprint)
         return sprint.id
 
     def create_or_update_sprint(
-        self, url: str, identifier: str, state: str, name: str, order: int
+        self,
+        url: str,
+        timestamp: datetime,
+        identifier: str,
+        state: str,
+        name: str,
+        order: int,
+        start_time: datetime,
+        end_time: datetime,
+        complete_time: datetime | None = None,
     ) -> UUID:
         try:
             sprint: Sprint = self.repository.get(Sprint.create_id(url))
         except AggregateNotFoundError:
             return self.create_sprint(
-                url=url, identifier=identifier, state=state, name=name, order=order
+                url=url,
+                timestamp=timestamp,
+                identifier=identifier,
+                state=state,
+                name=name,
+                order=order,
+                start_time=start_time,
+                end_time=end_time,
+                complete_time=complete_time,
             )
 
-        sprint.update(state=state, name=name, order=order)
+        sprint.update(
+            state=state,
+            name=name,
+            order=order,
+            start_time=start_time,
+            end_time=end_time,
+            complete_time=complete_time,
+        )
         self.save(sprint)
         return sprint.id
 
@@ -307,7 +353,12 @@ class AnalyticsDbApplication(ProcessApplication):
                     select(SqlSprint).where(SqlSprint.identifier == sprint_identifier)
                 ).scalar_one_or_none()
                 if sprint is not None:
-                    item.sprints.append(sprint)
+                    sprint_item = SqlSprintItem(
+                        sprint_id=sprint.id,
+                        item_id=domain_event.originator_id,
+                        add_time=domain_event.timestamp,
+                    )
+                    session.add(sprint_item)
 
             for milestone_identifier in domain_event.milestones:
                 milestone = session.execute(
@@ -316,7 +367,12 @@ class AnalyticsDbApplication(ProcessApplication):
                     )
                 ).scalar_one_or_none()
                 if milestone is not None:
-                    item.milestones.append(milestone)
+                    milestone_item = SqlMilestoneItem(
+                        milestone_id=milestone.id,
+                        item_id=domain_event.originator_id,
+                        add_time=domain_event.timestamp,
+                    )
+                    session.add(milestone_item)
 
             item_status_changelog = ItemStatusChangelog(
                 item_id=domain_event.originator_id,
@@ -325,6 +381,14 @@ class AnalyticsDbApplication(ProcessApplication):
                 end_time=None,
             )
             session.add(item_status_changelog)
+
+            item_rank_changelog = ItemRankChangelog(
+                item_id=domain_event.originator_id,
+                rank=domain_event.rank,
+                start_time=domain_event.timestamp,
+                end_time=None,
+            )
+            session.add(item_rank_changelog)
 
             session.commit()
 
@@ -360,6 +424,24 @@ class AnalyticsDbApplication(ProcessApplication):
                 .where(SqlItem.id == domain_event.originator_id)
                 .values(rank=domain_event.rank)
             )
+
+            session.execute(
+                update(ItemRankChangelog)
+                .where(
+                    ItemRankChangelog.item_id == domain_event.originator_id,
+                    ItemRankChangelog.end_time.is_(None),
+                )
+                .values(end_time=domain_event.timestamp)
+            )
+
+            item_rank_changelog = ItemRankChangelog(
+                item_id=domain_event.originator_id,
+                rank=domain_event.rank,
+                start_time=domain_event.timestamp,
+                end_time=None,
+            )
+            session.add(item_rank_changelog)
+
             session.commit()
 
     @_policy.register
@@ -410,12 +492,30 @@ class AnalyticsDbApplication(ProcessApplication):
                 )
             ).scalar_one_or_none()
 
-            # Sprint may not exist (any more), but item still has the event in its event history
+            # Sprint may not exist in case they are not loaded
             if sprint is None:
                 return
 
-            item = session.get_one(SqlItem, domain_event.item_id)
-            item.sprints.append(sprint)
+            # Get the existing active (the one without remove_time) association
+            existing_association = session.execute(
+                select(SqlSprintItem).where(
+                    SqlSprintItem.sprint_id.is_(sprint.id),
+                    SqlSprintItem.item_id.is_(domain_event.item_id),
+                    SqlSprintItem.remove_time.is_(None),
+                )
+            ).scalar_one_or_none()
+            if existing_association is not None:
+                raise ValueError(
+                    f"Item {domain_event.item_id} already has an active association with sprint {sprint.id}."
+                )
+
+            # Create a new association for the sprint and item
+            new_association = SqlSprintItem(
+                sprint_id=sprint.id,
+                item_id=domain_event.item_id,
+                add_time=domain_event.timestamp,
+            )
+            session.add(new_association)
             session.commit()
 
     @_policy.register
@@ -429,12 +529,25 @@ class AnalyticsDbApplication(ProcessApplication):
                 )
             ).scalar_one_or_none()
 
-            # Sprint may not exist (any more), but item still has the event in its event history
+            # Sprint may not exist in case they are not loaded
             if sprint is None:
                 return
 
-            item = session.get_one(SqlItem, domain_event.item_id)
-            item.sprints.remove(sprint)
+            # Get the existing active association
+            existing_association = session.execute(
+                select(SqlSprintItem).where(
+                    SqlSprintItem.sprint_id.is_(sprint.id),
+                    SqlSprintItem.item_id.is_(domain_event.item_id),
+                    SqlSprintItem.remove_time.is_(None),
+                )
+            ).scalar_one_or_none()
+
+            if existing_association is None:
+                raise ValueError(
+                    f"Item {domain_event.item_id} does not have an active association with sprint {sprint.id}."
+                )
+
+            existing_association.remove_time = domain_event.timestamp
             session.commit()
 
     @_policy.register
@@ -448,12 +561,32 @@ class AnalyticsDbApplication(ProcessApplication):
                 )
             ).scalar_one_or_none()
 
-            # Milestone may not exist (any more), but item still has the event in its event history
             if milestone is None:
                 return
 
-            item = session.get_one(SqlItem, domain_event.item_id)
-            item.milestones.append(milestone)
+            # Get the existing active (the one without remove_time) association for
+            # given item-milestone pair
+            existing_association = session.execute(
+                select(SqlMilestoneItem).where(
+                    SqlMilestoneItem.milestone_id.is_(milestone.id),
+                    SqlMilestoneItem.item_id.is_(domain_event.item_id),
+                    SqlMilestoneItem.remove_time.is_(None),
+                )
+            ).scalar_one_or_none()
+            if existing_association is not None:
+                raise ValueError(
+                    f"Item {domain_event.item_id} already has an active association with milestone {milestone.id}."
+                )
+                # latest_association.remove_time = domain_event.timestamp
+
+            # Create a new association for the milestone and item
+            new_association = SqlMilestoneItem(
+                milestone_id=milestone.id,
+                item_id=domain_event.item_id,
+                add_time=domain_event.timestamp,
+            )
+            session.add(new_association)
+
             session.commit()
 
     @_policy.register
@@ -467,12 +600,26 @@ class AnalyticsDbApplication(ProcessApplication):
                 )
             ).scalar_one_or_none()
 
-            # Milestone may not exist (any more), but item still has the event in its event history
             if milestone is None:
                 return
 
-            item = session.get_one(SqlItem, domain_event.item_id)
-            item.milestones.remove(milestone)
+            # Get the existing active (the one without remove_time) association for
+            # given item-milestone pair
+            existing_association = session.execute(
+                select(SqlMilestoneItem).where(
+                    SqlMilestoneItem.milestone_id.is_(milestone.id),
+                    SqlMilestoneItem.item_id.is_(domain_event.item_id),
+                    SqlMilestoneItem.remove_time.is_(None),
+                )
+            ).scalar_one_or_none()
+
+            if existing_association is None:
+                raise ValueError(
+                    f"Item {domain_event.item_id} does not have an active association with milestone {milestone.id}."
+                )
+
+            existing_association.remove_time = domain_event.timestamp
+
             session.commit()
 
     @_policy.register
@@ -480,11 +627,15 @@ class AnalyticsDbApplication(ProcessApplication):
         with self._get_transaction() as session:
             sprint = SqlSprint(
                 id=domain_event.originator_id,
+                create_time=domain_event.timestamp,
                 identifier=domain_event.identifier,
                 url=domain_event.url,
                 state=domain_event.state,
                 name=domain_event.name,
                 order=domain_event.order,
+                start_time=domain_event.start_time,
+                end_time=domain_event.end_time,
+                complete_time=domain_event.complete_time,
             )
             session.add(sprint)
             session.commit()
@@ -527,6 +678,48 @@ class AnalyticsDbApplication(ProcessApplication):
                 .where(SqlSprint.id == domain_event.originator_id)
                 .values(
                     order=domain_event.order,
+                )
+            )
+            session.commit()
+
+    @_policy.register
+    def _(
+        self, domain_event: Sprint.StartTimeChanged, process_event: ProcessingEvent
+    ) -> None:
+        with self._get_transaction() as session:
+            session.execute(
+                update(SqlSprint)
+                .where(SqlSprint.id == domain_event.originator_id)
+                .values(
+                    start_time=domain_event.start_time,
+                )
+            )
+            session.commit()
+
+    @_policy.register
+    def _(
+        self, domain_event: Sprint.EndTimeChanged, process_event: ProcessingEvent
+    ) -> None:
+        with self._get_transaction() as session:
+            session.execute(
+                update(SqlSprint)
+                .where(SqlSprint.id == domain_event.originator_id)
+                .values(
+                    end_time=domain_event.end_time,
+                )
+            )
+            session.commit()
+
+    @_policy.register
+    def _(
+        self, domain_event: Sprint.CompleteTimeChanged, process_event: ProcessingEvent
+    ) -> None:
+        with self._get_transaction() as session:
+            session.execute(
+                update(SqlSprint)
+                .where(SqlSprint.id == domain_event.originator_id)
+                .values(
+                    complete_time=domain_event.complete_time,
                 )
             )
             session.commit()
