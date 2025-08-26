@@ -725,24 +725,27 @@ class FlowMetrics:
         )
 
         # Create multiindex for columns
-        df.columns = pd.MultiIndex.from_tuples([(c, "") for c in df.columns])
+        df.columns = pd.MultiIndex.from_tuples([(c, "", "") for c in df.columns])
 
         # Add a column per milestone: ('milestones', milestone_name) with release_date if item has that milestone_id
         for _, m in m_df.iterrows():
             mid = m["milestone_id"]
             mname = m["milestone_name"]
             mdate = m["milestone_release_date"]
+            # Ensure the milestone date is in UTC
+            if mdate is not pd.NaT:
+                mdate = pd.to_datetime(mdate, utc=True)
 
-            mcol = ("milestones", mname)
+            mcol_date = ("milestones", mname, "date")
+            mcol_isin = ("milestones", mname, "isin")
             mask = df["milestone_id"] == mid
-            if mdate is pd.NaT:
-                df[mcol] = False
-                df.loc[mask, mcol] = True
-            else:
-                df[mcol] = pd.NaT
-                df.loc[mask, mcol] = mdate
-                # Ensure the milestone date is in UTC
-                df[mcol] = pd.to_datetime(df[mcol], utc=True)
+            df[mcol_isin] = False
+            df[mcol_date] = pd.NaT
+            df[mcol_date] = pd.to_datetime(df[mcol_date], utc=True)
+
+            df.loc[mask, mcol_isin] = True
+            if mdate is not pd.NaT:
+                df.loc[mask, mcol_date] = mdate
 
         # Aggregate all level 1 columns under 'milestone' using max,
         # this gets us the wide format of milestone columns
@@ -752,13 +755,13 @@ class FlowMetrics:
         df = (
             df.groupby(
                 [
-                    ("identifier", ""),
-                    ("item_type", ""),
-                    ("status", ""),
-                    ("summary", ""),
-                    ("sprint_order", ""),
-                    ("finished_time", ""),
-                    ("rank", ""),
+                    ("identifier", "", ""),
+                    ("item_type", "", ""),
+                    ("status", "", ""),
+                    ("summary", "", ""),
+                    ("sprint_order", "", ""),
+                    ("finished_time", "", ""),
+                    ("rank", "", ""),
                 ],
                 dropna=False,
             )
@@ -767,21 +770,23 @@ class FlowMetrics:
         )
 
         # Ensure finished_time is UTC
-        df[("finished_time", "")] = pd.to_datetime(df[("finished_time", "")], utc=True)
+        df[("finished_time", "", "")] = pd.to_datetime(
+            df[("finished_time", "", "")], utc=True
+        )
 
         # Prepare column for Monte Carlo "when" simulation results
-        df[("mc_when", "")] = pd.NaT
+        df[("mc_when", "", "")] = pd.NaT
 
         statuses = (
             self._workflow._not_started
             + self._workflow._in_progress
             + self._workflow._finished
         )
-        df[("status_order", "")] = df[("status", "")].apply(
+        df[("status_order", "", "")] = df[("status", "", "")].apply(
             lambda s: statuses.index(s) if s in statuses else -1
         )
 
-        df_finished = df[df[("finished_time", "")].notna()]
+        df_finished = df[df[("finished_time", "", "")].notna()]
         df_finished = df_finished.sort_values(
             by=["finished_time"], na_position="last", ignore_index=True
         )
@@ -790,7 +795,7 @@ class FlowMetrics:
         if max_finished_items is not None and max_finished_items >= 0:
             df_finished = df_finished.tail(max_finished_items)
 
-        df_unfinished = df[df[("finished_time", "")].isna()]
+        df_unfinished = df[df[("finished_time", "", "")].isna()]
         sort_cols = (
             ["status_order", "sprint_order", "rank"]
             if sort_in_progress_first
@@ -806,7 +811,7 @@ class FlowMetrics:
 
         # Run Monte Carlo "when" simulation for each backlog item row
         if mc_when:
-            df_unfinished[("mc_when", "")] = df_unfinished.index.map(
+            df_unfinished[("mc_when", "", "")] = df_unfinished.index.map(
                 lambda x: self._get_mc_when_date(
                     self.df_monte_carlo_when(
                         mc_when_runs,
@@ -816,72 +821,84 @@ class FlowMetrics:
                     percentile=mc_when_percentile,
                 )
             )
-            df_unfinished[("mc_when", "")] = df_unfinished[
-                ("mc_when", "")
+            df_unfinished[("mc_when", "", "")] = df_unfinished[
+                ("mc_when", "", "")
             ].dt.normalize()  # Keep only day precision
 
         # Combine finished and unfinished items so they are in timeline order
         df = pd.concat([df_finished, df_unfinished], ignore_index=True)
 
         # Ensure mc_when is UTC
-        df[("mc_when", "")] = pd.to_datetime(df[("mc_when", "")], utc=True)
+        df[("mc_when", "", "")] = pd.to_datetime(df[("mc_when", "", "")], utc=True)
 
         return df
 
     def styled_timeline_items(self, df: DataFrame) -> Styler:
         # Create styled DataFrame
-        df[("timeline", "date")] = df[("finished_time", "")].combine_first(
-            df[("mc_when", "")]
+        df[("date", "", "")] = df[("finished_time", "", "")].combine_first(
+            df[("mc_when", "", "")]
         )
 
-        df["timeline", "y"] = df["timeline", "date"].dt.year
-        df["timeline", "m"] = df["timeline", "date"].dt.month
-        df["timeline", "w"] = df["timeline", "date"].dt.isocalendar().week
+        df["y", "", ""] = df["date", "", ""].dt.year
+        df["m", "", ""] = df["date", "", ""].dt.month
+        df["w", "", ""] = df["date", "", ""].dt.isocalendar().week
 
-        # Remove milestones columns that are all NaN or False (no need to display)
-        for rem_col in [c for c in df.columns if c[0] == "milestones"]:
-            if df[rem_col].isna().all() or df[rem_col].eq(False).all():
-                df = df.drop(columns=[rem_col])
+        milestone_cols = []
+        for col in [c for c in df.columns if c[0] == "milestones" and c[2] == "isin"]:
+            milestone = col[1]
 
-        # Calculate diff in days against milestone release date
-        for col in df.columns:
-            if col[0] == "milestones" and pd.api.types.is_datetime64_any_dtype(df[col]):
-                mask_date_nat = (
-                    df[("timeline", "date")].isna() & df[("milestones", col[1])].notna()
-                )
+            isin_col = ("milestones", milestone, "isin")
+            date_col = ("milestones", milestone, "date")
+            diff_col = ("milestones", milestone, "diff")
+            timeline_date_col = ("date", "", "")
 
-                df[("milestones", col[1])] = (
-                    pd.to_datetime(df[("timeline", "date")], utc=True)
-                    - pd.to_datetime(df[col], utc=True)
-                ).dt.days.astype("object")
+            isin = df[isin_col]
+            milestone_date = df[date_col]
+            timeline_date = df[timeline_date_col]
 
-                df.loc[mask_date_nat, ("milestones", col[1])] = True
+            # Default to NaN
+            df[diff_col] = pd.NA
 
-        df["timeline", "date"] = df["timeline", "date"].dt.date
-        df = df.loc[
-            :,
-            [
-                ("timeline", "y"),
-                ("timeline", "m"),
-                ("timeline", "w"),
-                ("timeline", "date"),
-                ("identifier", ""),
-                ("item_type", ""),
-                ("status", ""),
-                ("summary", ""),
-            ]
-            + [c for c in df.columns if c[0] == "milestones"],
+            # Where isin is True and either milestone date or timeline date is nan, set to True
+            mask_empty = isin & (milestone_date.isna() | timeline_date.isna())
+            df.loc[mask_empty, diff_col] = True
+
+            # Where isin is True and both dates are present, set to diff in days
+            mask_diff = isin & milestone_date.notna() & timeline_date.notna()
+            df.loc[mask_diff, diff_col] = (
+                timeline_date[mask_diff] - milestone_date[mask_diff]
+            ).dt.days.astype(int)
+
+            df[(milestone, "", "")] = df[diff_col]
+
+            # Keep only milestones that have items in them
+            if df[diff_col].notna().any():
+                milestone_cols.append(milestone)
+
+        # Keep only topmost level of column multiindex
+        df.columns = df.columns.get_level_values(0)
+
+        df["date"] = df["date"].dt.date
+        df = df[
+            ["y", "m", "w", "date", "identifier", "item_type", "status", "summary"]
+            + milestone_cols
         ]
 
-        return df.style.pipe(FlowMetrics._style_timeline, workflow=self._workflow)
+        return df.style.pipe(
+            FlowMetrics._style_timeline,
+            workflow=self._workflow,
+            milestone_cols=milestone_cols,
+        )
 
     @staticmethod
-    def _style_timeline(style: Styler, workflow: Workflow) -> Styler:
+    def _style_timeline(
+        style: Styler, workflow: Workflow, milestone_cols: list[str]
+    ) -> Styler:
         # Color statuses
         style.apply(
             lambda row: [
                 "background-color: lightgreen"
-                if col[0] == "status" and row[("status", "")] in workflow._finished
+                if col == "status" and row[col] in workflow._finished
                 else ""
                 for col in row.index
             ],
@@ -890,7 +907,7 @@ class FlowMetrics:
         style.apply(
             lambda row: [
                 "background-color: orange"
-                if col[0] == "status" and row[("status", "")] in workflow._in_progress
+                if col == "status" and row[col] in workflow._in_progress
                 else ""
                 for col in row.index
             ],
@@ -899,17 +916,17 @@ class FlowMetrics:
         style.apply(
             lambda row: [
                 "background-color: pink"
-                if col[0] == "status" and row[("status", "")] in workflow._not_started
+                if col == "status" and row[col] in workflow._not_started
                 else ""
                 for col in row.index
             ],
             axis=1,
         )
 
-        milestone_cols = [col for col in style.columns if col[0] == "milestones"]
+        # milestone_cols = [col for col in style.columns if col[0] == "milestones"]
         styled_milestone_cols = [
             {
-                "selector": f"th.col_heading.level1.col{style.columns.get_loc(col)}",
+                "selector": f"th.col_heading.level0.col{style.columns.get_loc(col)}",
                 "props": [
                     ("writing-mode", "vertical-rl"),
                     ("transform", "rotate(180deg)"),
@@ -921,38 +938,11 @@ class FlowMetrics:
         ]
         style.set_table_styles(styled_milestone_cols, axis=1, overwrite=False)  # type: ignore[arg-type]
 
-        timeline_cols = [col for col in style.columns if col[0] == "timeline"]
-        styled_timeline_cols = [
-            {
-                "selector": f"th.col_heading.level1.col{style.columns.get_loc(col)}",
-                "props": [
-                    ("vertical-align", "bottom"),
-                ],
-            }
-            for col in timeline_cols
-        ]
-        style.set_table_styles(styled_timeline_cols, axis=1, overwrite=False)  # type: ignore[arg-type]
-
-        # Style level 0 column headers with bigger font and center alignment
-        style.set_table_styles(
-            [
-                {
-                    "selector": "th.col_heading.level0",
-                    "props": [
-                        ("font-size", "1.2em"),
-                        ("font-weight", "bold"),
-                        ("text-align", "center"),
-                    ],
-                }
-            ],
-            axis=1,
-            overwrite=False,
-        )
-
         # Format and highlight milestone data values
         style.format(
-            FlowMetrics._format_milestone_date, subset=milestone_cols, na_rep=""
+            FlowMetrics._format_milestone_diff, subset=milestone_cols, na_rep=""
         )
+
         style.map(FlowMetrics._highlight_milestone_diff, subset=milestone_cols)
 
         # Prevent wrapping of text in all cells
@@ -961,27 +951,25 @@ class FlowMetrics:
         return style
 
     @staticmethod
-    def _format_milestone_date(val: object) -> str:
-        if isinstance(val, (np.integer, int, float, np.floating)) and not isinstance(
-            val, bool
-        ):
+    def _format_milestone_diff(val: object) -> str:
+        if isinstance(val, bool):
+            return ""
+        if isinstance(val, (np.integer, int, float, np.floating)):
             sign = ""
             if val >= 0:
                 sign = "+"
             return f"{sign}{int(val)}"
-        return ""
+        return str(val)
 
     @staticmethod
     def _highlight_milestone_diff(val: Any) -> str | None:
-        if isinstance(val, bool):
-            if val:
-                return "background-color: lightblue; color: black;"
-            else:
-                return None
-        if val <= 0:
-            return "background-color: green; color: white;"
-        elif val > 0:
-            return "background-color: red; color: white;"
+        if isinstance(val, bool) and val is True:
+            return "background-color: lightblue; color: black;"
+        if isinstance(val, int):
+            if val <= 0:
+                return "background-color: green; color: white;"
+            elif val > 0:
+                return "background-color: red; color: white;"
         return None
 
     def plot_cfd(
